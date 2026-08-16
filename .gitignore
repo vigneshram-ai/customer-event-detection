@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# uv
+uv.lock.bak
+
+# Airflow local runtime state (never commit runtime logs/db)
+airflow/logs/*
+!airflow/logs/.gitkeep
+!airflow/.env
+
+# Data artifacts (generated, not committed — datasets are reproducible from seed)
+data/
+*.parquet
+*.delta/
+
+# Docker / env
+.env
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
