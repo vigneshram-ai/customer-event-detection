@@ -24,4 +24,5 @@ select = ["E", "F", "I", "UP", "B"]
 # B:   bugbear — catches common real bugs, not just style
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 testpaths = ["tests"]
