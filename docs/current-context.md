@@ -4,56 +4,62 @@ _Purpose: if a new chat/session starts, read this file first to know exactly whe
 project stands, without re-deriving it from conversation history._
 
 ## Where We Are
-Milestone 1 (Repository & Local Development Environment) is **complete and verified**.
-Milestone 2 has **not** started.
+Milestone 1 (repo/environment) and Milestone 2 (synthetic customer generator) are
+**complete and verified**. Milestone 3 (synthetic event generator) is now **complete
+and verified**. Milestone 4 has **not** started.
 
 ## What Is Actually True Right Now
-- The repo exists locally and on GitHub (`main` branch), CI is green.
-- Local Airflow (Docker Compose, `LocalExecutor`) is running and has successfully executed
-  one manual smoke-test DAG. It has no real pipeline logic yet.
-- No application code exists yet — no data generator, no Spark, no MLflow, no models.
-  Every reference to those in earlier planning docs is 📐 DESIGNED ONLY / ⏳ FUTURE, not built.
-- `pyproject.toml` has zero production dependencies. Only `pytest` and `ruff` (dev group).
+- The repo exists locally and on GitHub (`main` branch). CI was last confirmed green
+  as of Milestone 1/2 work — **not yet re-confirmed on `main` after Milestone 3**;
+  push and check before treating CI as verified for this milestone.
+- Local Airflow (Docker Compose, `LocalExecutor`) is running with one manual
+  smoke-test DAG. Still no real pipeline logic, and not yet used to orchestrate
+  either generator — both are standalone scripts run manually.
+- `data_generation/customer_generator.py` (Milestone 2) and
+  `data_generation/event_generator.py` (Milestone 3) both exist, are stdlib-only,
+  seeded/deterministic, and have full test coverage (28 tests total, all passing).
+- A real dataset has been generated and verified: 1,000 customers, 27,128 events,
+  542 injected anomalies (2.00%) — files at `data/raw/customers.csv`,
+  `data/raw/events.csv`, `data/raw/events_ground_truth.csv`.
+- No Spark, no Databricks, no MLflow, no models, no Delta tables exist yet. No
+  ingestion/orchestration pipeline exists yet — the generators are not wired into
+  Airflow or any Bronze-layer process.
+- `pyproject.toml` has zero production dependencies. Only `pytest` and `ruff`.
+
+## Key Design Decisions From Milestone 3 (do not silently revisit)
+- Ground truth anomaly labels live in a **separate sidecar file**
+  (`events_ground_truth.csv`), not inline in `events.csv` — keeps the main event file
+  representative of an unlabeled real ingestion source.
+- Default event-generation date window is a **fixed literal range**
+  (`2026-01-01`–`2026-03-31`), not `datetime.now()` — required for deterministic,
+  reproducible output given the same seed.
+- Anomaly type selection is weighted by `event_type`: `new_device` is impossible for
+  `device_changed` events (self-contradictory) and boosted for
+  `login`/`card_transaction`/`payment` (device is the actual acting agent for those).
+- Event volume per customer uses a flat configurable range (`--events-min`/`--events-max`),
+  **not** tied to `account_age_days` tier — user explicitly chose the simpler option;
+  revisit later if needed.
+- Default anomaly injection rate is 2% (rare-event realistic), configurable via
+  `--anomaly-rate`.
 
 ## Environment Snapshot
 - Windows (native, no WSL2 terminal)
-- `uv` 0.12.5, project Python 3.11 (system Python is 3.14.2 — irrelevant to the project,
-  `uv` manages its own interpreter)
+- `uv` 0.12.5, project Python 3.11.16 (confirmed via pytest platform output)
 - Docker Desktop running, Airflow 3.3.1 via Docker Compose, LocalExecutor
-- Git remote connected, CI passing on GitHub Actions
-- Git version is 2.55.0.windows.4
-- Docker version
-    Client:
-        Version:           29.7.2
-        API version:       1.55
-        Go version:        go1.26.5
-        Git commit:        a7dcaa6
-        Built:             Wed Aug  5 18:31:33 2026
-        OS/Arch:           windows/amd64
-        Context:           desktop-linux
-    Server: Docker Desktop 4.86.0 (236216)
-        Engine:
-        Version:          29.7.2
-        API version:      1.55 (minimum version 1.40)
-        Go version:       go1.26.5
-        Git commit:       6a43e3d
-        Built:            Wed Aug  5 18:28:36 2026
-        OS/Arch:          linux/amd64
-        Experimental:     false
-        containerd:
-        Version:          v2.2.5
-        GitCommit:        e53c7c1516c3b2bff98eb76f1f4117477e6f4e66
-        runc:
-        Version:          1.3.6
-        GitCommit:        v1.3.6-0-g491b69ba
-        docker-init:
-        Version:          0.19.0
-        GitCommit:        de40ad0
-- Docker Compose version v5.3.1
+- Git remote connected
+- Git version 2.55.0.windows.4
 
 ## Known Gaps (do not silently "fix" these — ask the user first)
 - Full ADR-002 (Airflow vs. non-Airflow alternatives) not yet written — only the
   narrower executor/version decision is documented (ADR-009).
+- **How local CSV output reaches Databricks/Delta is undesigned.** Discussed
+  conceptually (likely: Airflow task uploads to a Databricks Unity Catalog volume via
+  REST API/SDK, then a Databricks job lands it as Delta) but not decided or
+  implemented. This must be properly designed — with trade-offs presented — before
+  Milestone 4 (Bronze ingestion) begins. Do not assume a specific mechanism.
+- Anomaly injection is single-event-level only; no multi-event bursts. Deliberate
+  Milestone 3 scope decision, documented as technical debt, not silently expanded.
+- CI has not been re-confirmed green after Milestone 3's changes.
 
 ## Operating Rules Still In Effect (carried over, do not relax)
 - Build incrementally — one milestone at a time, user runs everything themselves.
@@ -62,11 +68,15 @@ Milestone 2 has **not** started.
 - Distinguish IMPLEMENTED / DESIGNED / FUTURE explicitly, always.
 - Update `docs/project-status.md` after every milestone.
 - Every technology must have a stated architectural purpose — no CV-padding.
+- Claude Desktop workflow: never assume direct local file/execution access — provide
+  files and exact commands, wait for the user to run them and report output.
 
 ## Immediate Next Step
-Start Milestone 2: **Synthetic customer generator** — explain → design → implement →
-test → verify → document → interview implications, in that order, small increment first
-(customer entity only — event generation is Milestone 3).
+Push Milestone 3 changes and confirm CI is green on `main`. Then start Milestone 4:
+**Bronze-layer ingestion into Databricks/Delta** — this requires first explaining and
+designing the local→Databricks handoff mechanism (currently undesigned) before any
+implementation, per the standard explain → design → implement flow. Do not begin
+without explicit user confirmation.
 
 ## Reference Files
 - `docs/project-status.md` — full status detail
