@@ -27,6 +27,7 @@
 
 # COMMAND ----------
 
+from databricks.sdk.runtime import display, spark
 from pyspark.sql import functions as F
 from pyspark.sql.types import DoubleType, IntegerType, StringType, StructField, StructType
 
