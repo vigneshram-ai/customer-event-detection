@@ -5,16 +5,14 @@ project stands, without re-deriving it from conversation history._
 
 ## Where We Are
 Milestones 1–5 are **complete and verified**. Milestone 5 (Silver-layer cleaning and
-validation) closed with one deliberate technical-debt trade-off (see below). CI has
-not yet been re-confirmed green on `main` after Milestone 5's changes — only local
-`ruff check`/`ruff format --check` are confirmed clean so far. Milestone 6 has **not**
-started.
+validation) is fully closed — CI confirmed green on `main`, all files including
+`silver_transformation.py` committed. One deliberate technical-debt trade-off carried
+forward (see below). Milestone 6 has **not** started.
 
 ## What Is Actually True Right Now
 - The repo exists locally and on GitHub (`main` branch).
-- CI was confirmed green on `main` as of Milestone 4. **Not yet re-confirmed for
-  Milestone 5** — push and confirm before treating Milestone 5 as fully closed for
-  CI purposes.
+- CI is **confirmed green on `main`** as of Milestone 5, including
+  `silver_transformation.py`.
 - Local Airflow (Docker Compose, `LocalExecutor`) is still running with only the
   temporary smoke-test DAG. Not orchestrating anything real yet — deliberately
   deferred to Milestone 12.
@@ -97,8 +95,6 @@ started.
 
 ## Known Gaps (do not silently "fix" these — ask the user first)
 - Full ADR-002 (Airflow vs. non-Airflow alternatives) not yet written.
-- **CI has not been re-confirmed green after Milestone 5's changes.** Push and
-  confirm before starting Milestone 6.
 - **Gold-layer / feature engineering design is not started.**
 - `amount = 0.0` ambiguity (see above) — intentionally left as-is; only revisit if
   Milestone 6+ feature engineering genuinely needs to distinguish "not applicable"
@@ -121,9 +117,8 @@ started.
   the trade-off explicitly rather than silently reopening it later.
 
 ## Immediate Next Step
-Push Milestone 5 and confirm CI is green on `main`. Then start **Milestone 6:
-Gold-layer feature engineering** — not started; do not begin without explicit user
-confirmation.
+Milestone 5 is fully closed. Next up is **Milestone 6: Gold-layer feature
+engineering** — not started; do not begin without explicit user confirmation.
 
 ## Reference Files
 - `docs/project-status.md` — full status detail

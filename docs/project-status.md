@@ -2,10 +2,10 @@
 
 _Last updated: End of Milestone 5_
 
-_Milestone 5 status: IMPLEMENTED AND VERIFIED — real end-to-end run against live
-Databricks confirmed 0% reject rate on both tables; one deliberate technical-debt
-trade-off documented (amount NULL-vs-0.0, see ADR-011). CI push/confirmation
-pending — see Known Issues._
+_Milestone 5 status: IMPLEMENTED AND VERIFIED — fully closed, CI green, real
+end-to-end run against live Databricks confirmed 0% reject rate on both tables.
+One deliberate technical-debt trade-off documented (amount NULL-vs-0.0, see
+ADR-011)._
 
 ## Status Legend
 - ✅ IMPLEMENTED & VERIFIED — built, run, and confirmed working by the user with observed output
@@ -118,8 +118,7 @@ pending — see Known Issues._
 ---
 
 ## Current Work
-None in progress. Milestone 5 is closed pending CI confirmation on `main` (see
-Known Issues).
+None in progress. Milestone 5 is closed.
 
 ## Pending Work
 Milestones 6–23 per the approved roadmap, starting with Gold-layer feature
@@ -150,12 +149,7 @@ Full ADR-002 ("Airflow as the Orchestration Layer" broadly) remains pending.
 ---
 
 ## Known Issues
-- **CI not yet re-confirmed green on `main` after Milestone 5 changes.** Local
-  `ruff check`/`ruff format --check` confirmed clean by the user; push and CI
-  confirmation still outstanding before Milestone 5 is fully closed.
-- ~~`merchant_category` reads as `NULL` for non-monetary events~~ — **resolved**
-  in Silver validation logic (see Milestone 5 above); this is now correctly
-  treated as valid, not a defect.
+- None blocking. CI confirmed green on `main` after Milestone 5 changes.
 
 ## Technical Debt
 1. No pre-commit hook. Flagged since Milestone 1, still low priority.
@@ -295,14 +289,11 @@ customer-event-detection/
 ## Linting/Formatting Setup
 - Tool: `ruff` (single tool for both)
 - Verified commands: `uv run ruff check .`, `uv run ruff format --check .` — both
-  clean as of Milestone 5 changes (user-confirmed locally; CI confirmation
-  pending)
+  clean as of Milestone 5 changes, confirmed both locally and in CI
 
 ## CI/CD Status
 - GitHub Actions workflow `ci.yml`: lint → format check → test, on push/PR to `main`
-- ✅ Confirmed green on `main` as of Milestone 4
-- 🟡 **Not yet re-confirmed on `main` after Milestone 5 changes** — push and
-  confirm before treating Milestone 5 as fully closed for CI purposes
+- ✅ **Confirmed green on `main` after Milestone 5 changes**
 - Still does not build/run Docker, Airflow, or touch Databricks (by design — no
   live credentials in CI)
 
@@ -327,5 +318,4 @@ Rejection-reason breakdown queries for both `events_rejects` and
 
 ## Next Recommended Task
 **Milestone 6: Gold-layer feature engineering.** Not started — do not begin
-without explicit confirmation. Before design begins, push Milestone 5 and confirm
-CI is green on `main`.
+without explicit confirmation.
