@@ -4,81 +4,112 @@ _Purpose: if a new chat/session starts, read this file first to know exactly whe
 project stands, without re-deriving it from conversation history._
 
 ## Where We Are
-Milestone 1 (repo/environment) and Milestone 2 (synthetic customer generator) are
-**complete and verified**. Milestone 3 (synthetic event generator) is now **complete
-and verified**. Milestone 4 has **not** started.
+Milestones 1–4 are **complete and verified**. Milestone 4 (Bronze-layer ingestion
+into Databricks/Delta) closed with one documented, accepted known limitation (see
+below). Milestone 5 has **not** started.
 
 ## What Is Actually True Right Now
-- The repo exists locally and on GitHub (`main` branch). CI was last confirmed green
-  as of Milestone 1/2 work — **not yet re-confirmed on `main` after Milestone 3**;
+- The repo exists locally and on GitHub (`main` branch).
+- **CI has not been re-confirmed green on `main` after Milestone 4's changes** —
   push and check before treating CI as verified for this milestone.
-- Local Airflow (Docker Compose, `LocalExecutor`) is running with one manual
-  smoke-test DAG. Still no real pipeline logic, and not yet used to orchestrate
-  either generator — both are standalone scripts run manually.
-- `data_generation/customer_generator.py` (Milestone 2) and
-  `data_generation/event_generator.py` (Milestone 3) both exist, are stdlib-only,
-  seeded/deterministic, and have full test coverage (28 tests total, all passing).
-- A real dataset has been generated and verified: 1,000 customers, 27,128 events,
-  542 injected anomalies (2.00%) — files at `data/raw/customers.csv`,
-  `data/raw/events.csv`, `data/raw/events_ground_truth.csv`.
-- No Spark, no Databricks, no MLflow, no models, no Delta tables exist yet. No
-  ingestion/orchestration pipeline exists yet — the generators are not wired into
-  Airflow or any Bronze-layer process.
-- `pyproject.toml` has zero production dependencies. Only `pytest` and `ruff`.
+- Local Airflow (Docker Compose, `LocalExecutor`) is still running with only the
+  temporary smoke-test DAG. Not orchestrating anything real yet — deliberately
+  deferred to Milestone 12.
+- `data_generation/customer_generator.py`, `data_generation/event_generator.py`,
+  `ingestion/upload_to_volume.py` all exist, are tested (31 tests total, all
+  passing), `ruff` clean.
+- `notebooks/bronze_ingestion.py` exists and has been run successfully against the
+  live Databricks Free Edition workspace. It has **no automated test coverage** —
+  verification is manual/observed-output only (no local PySpark harness in this
+  project).
+- **Databricks side is real and verified**: workspace
+  `https://dbc-01205ae9-f87b.cloud.databricks.com/`, Unity Catalog `ced`, schema
+  `bronze`, volume `raw_uploads` (holds `customers.csv`, `events.csv` — NOT the
+  ground-truth sidecar, deliberately excluded). Delta tables `ced.bronze.customers`
+  (1,000 rows) and `ced.bronze.events` (27,128 rows) exist and match the Milestone 3
+  generator output exactly.
+- No Silver/Gold layers, no feature engineering, no MLflow, no models exist yet.
+- `pyproject.toml` now has **two production dependencies**: `databricks-sdk`,
+  `python-dotenv` (first production deps in the project — previously dev-only).
+- `.env` (git-ignored, confirmed via `git status`) holds `DATABRICKS_HOST` /
+  `DATABRICKS_TOKEN`. Never commit this file or its contents.
 
-## Key Design Decisions From Milestone 3 (do not silently revisit)
-- Ground truth anomaly labels live in a **separate sidecar file**
-  (`events_ground_truth.csv`), not inline in `events.csv` — keeps the main event file
-  representative of an unlabeled real ingestion source.
-- Default event-generation date window is a **fixed literal range**
-  (`2026-01-01`–`2026-03-31`), not `datetime.now()` — required for deterministic,
-  reproducible output given the same seed.
-- Anomaly type selection is weighted by `event_type`: `new_device` is impossible for
-  `device_changed` events (self-contradictory) and boosted for
-  `login`/`card_transaction`/`payment` (device is the actual acting agent for those).
-- Event volume per customer uses a flat configurable range (`--events-min`/`--events-max`),
-  **not** tied to `account_age_days` tier — user explicitly chose the simpler option;
-  revisit later if needed.
-- Default anomaly injection rate is 2% (rare-event realistic), configurable via
-  `--anomaly-rate`.
+## Key Design Decisions From Milestone 4 (do not silently revisit — full detail in ADR-010)
+- Local→Databricks handoff: standalone Python script using `databricks-sdk`
+  (`WorkspaceClient`), NOT the Databricks CLI, NOT Databricks Connect.
+- NOT wired into Airflow yet — deliberate, deferred to Milestone 12 when Airflow
+  gets real pipeline logic. Both `upload_file()` and `ingest_to_bronze()` are
+  written with clean function boundaries so they drop into Airflow tasks later
+  without redesign.
+- Databricks notebooks are stored as plain `.py` files in Databricks' "source"
+  format (not `.ipynb`) — git-diff friendly, lintable by `ruff`, consistent with
+  the project's all-Python convention.
+- Bronze schema is explicit (`StructType`), not inferred. `event_timestamp` is kept
+  as a string in Bronze — parsing to a real timestamp is a Silver-layer decision.
+- Bronze writes use `mode("overwrite")` — full snapshot semantics, matching how the
+  generators work (regenerate the whole dataset each run). No ingestion history is
+  retained across runs.
+- **`merchant_category` NULL-vs-empty-string caveat, accepted not fixed**:
+  Databricks' Photon CSV reader converts the generator's intentional `""` values
+  (non-monetary event types) to `NULL`. A sentinel-based `nullValue`/`emptyValue`
+  workaround was investigated and does not work on this engine. This is Bronze's
+  actual, accepted behavior. **Silver-layer cleaning MUST treat `NULL`
+  `merchant_category` on non-monetary event types (`login`, `failed_login`,
+  `beneficiary_added`, `device_changed`, `password_changed`, `profile_changed`) as
+  the expected "not applicable" state — not as missing/dirty data.** Do not
+  silently "fix" this in Bronze later without discussing it first; it's a
+  documented trade-off, not an oversight.
+- Unity Catalog catalog name is lowercase `ced`, not `CED` — UC normalizes catalog
+  names to lowercase regardless of how they're typed at creation. Both
+  `upload_to_volume.py`'s default `--volume-path` and the notebook's `CATALOG`
+  constant use lowercase `ced`.
 
 ## Environment Snapshot
 - Windows (native, no WSL2 terminal)
-- `uv` 0.12.5, project Python 3.11.16 (confirmed via pytest platform output)
+- `uv` 0.12.5, project Python 3.11.16
 - Docker Desktop running, Airflow 3.3.1 via Docker Compose, LocalExecutor
-- Git remote connected
-- Git version 2.55.0.windows.4
+- Git remote connected, Git version 2.55.0.windows.4
+- Databricks Free Edition workspace:
+  `https://dbc-01205ae9-f87b.cloud.databricks.com/`
+- Unity Catalog: catalog `ced`, schema `bronze`, volume `raw_uploads`
+- PAT stored in `.env` (git-ignored)
 
 ## Known Gaps (do not silently "fix" these — ask the user first)
-- Full ADR-002 (Airflow vs. non-Airflow alternatives) not yet written — only the
-  narrower executor/version decision is documented (ADR-009).
-- **How local CSV output reaches Databricks/Delta is undesigned.** Discussed
-  conceptually (likely: Airflow task uploads to a Databricks Unity Catalog volume via
-  REST API/SDK, then a Databricks job lands it as Delta) but not decided or
-  implemented. This must be properly designed — with trade-offs presented — before
-  Milestone 4 (Bronze ingestion) begins. Do not assume a specific mechanism.
-- Anomaly injection is single-event-level only; no multi-event bursts. Deliberate
-  Milestone 3 scope decision, documented as technical debt, not silently expanded.
-- CI has not been re-confirmed green after Milestone 3's changes.
+- Full ADR-002 (Airflow vs. non-Airflow alternatives) not yet written.
+- **Silver-layer design is not started.** Must explicitly resolve the
+  `merchant_category` NULL-handling rule (see above), define real data-quality
+  gates (nulls, valid event types/timestamps/amount ranges, referential integrity
+  to `customers`), and decide how/where `event_timestamp` gets parsed to a proper
+  timestamp type.
+- CI has not been re-confirmed green after Milestone 4's changes.
+- Bronze ingestion is manual (no Airflow orchestration) — deliberate, per ADR-010,
+  until Milestone 12.
 
 ## Operating Rules Still In Effect (carried over, do not relax)
 - Build incrementally — one milestone at a time, user runs everything themselves.
-- Never claim something is implemented unless it was actually built and verified with
-  observed output.
+- Never claim something is implemented unless it was actually built and verified
+  with observed output.
 - Distinguish IMPLEMENTED / DESIGNED / FUTURE explicitly, always.
 - Update `docs/project-status.md` after every milestone.
 - Every technology must have a stated architectural purpose — no CV-padding.
-- Claude Desktop workflow: never assume direct local file/execution access — provide
-  files and exact commands, wait for the user to run them and report output.
+- Claude Desktop workflow: never assume direct local file/execution access —
+  provide files and exact commands, wait for the user to run them and report
+  output.
+- When something goes wrong (e.g. the CSV null/empty investigation), don't chase
+  it indefinitely if the user says stop — accept and document the decision
+  explicitly rather than silently working around it later.
 
 ## Immediate Next Step
-Push Milestone 3 changes and confirm CI is green on `main`. Then start Milestone 4:
-**Bronze-layer ingestion into Databricks/Delta** — this requires first explaining and
-designing the local→Databricks handoff mechanism (currently undesigned) before any
-implementation, per the standard explain → design → implement flow. Do not begin
-without explicit user confirmation.
+Push Milestone 4 changes and confirm CI is green on `main`. Then start **Milestone
+5: Silver-layer cleaning and validation** — this requires first explicitly
+designing: (1) the `merchant_category` NULL-handling rule, (2) the real
+data-quality gates to apply, (3) where/how `event_timestamp` gets parsed, and (4)
+referential integrity checks between `events` and `customers`. Do not begin without
+explicit user confirmation.
 
 ## Reference Files
 - `docs/project-status.md` — full status detail
 - `docs/adr/ADR-009-airflow-local-dev-topology.md` — Airflow version/executor decision
+- `docs/adr/ADR-010-local-to-databricks-bronze-ingestion.md` — ingestion mechanism,
+  Bronze design, and the merchant_category NULL-caveat decision
 - `README.md` — public-facing summary (kept minimal, accurate)
