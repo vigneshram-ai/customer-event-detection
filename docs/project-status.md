@@ -2,7 +2,7 @@
 
 _Last updated: End of Milestone 4_
 
-_Milestone 4 status: IMPLEMENTED AND VERIFIED (with one documented known limitation)_
+_Milestone 4 status: IMPLEMENTED AND VERIFIED — fully closed, CI green, no open items (one documented known limitation carried into Milestone 5 by design: see merchant_category NULL caveat)_
 
 ## Status Legend
 - ✅ IMPLEMENTED & VERIFIED — built, run, and confirmed working by the user with observed output
@@ -132,8 +132,15 @@ Full ADR-002 ("Airflow as the Orchestration Layer" broadly) remains pending.
 - **`merchant_category` reads as `NULL` instead of empty string for non-monetary
   event types in Bronze** (Databricks Photon CSV reader behavior). Documented and
   accepted in ADR-010. Silver-layer cleaning must handle this explicitly.
-- CI has not been re-confirmed green on `main` after Milestone 4's changes — **push
-  and confirm before treating Milestone 4 as fully closed for CI purposes.**
+- ~~CI not re-confirmed green~~ — **resolved.** CI failed lint initially (`ruff`
+  flagged `spark`/`display` as undefined names in `notebooks/bronze_ingestion.py` —
+  these are Databricks-runtime-injected globals, not real Python imports, so a
+  plain-Python linter correctly can't resolve them). Fixed with
+  `from databricks.sdk.runtime import display, spark` at the top of the notebook —
+  this is Databricks' own documented pattern for making these names resolvable to
+  static analysis/IDEs without creating a second Spark session at runtime. Notebook
+  was re-run after the fix and produced identical verified output (1,000 / 27,128
+  rows). CI is now green on `main`.
 
 ## Technical Debt
 1. No pre-commit hook. Flagged since Milestone 1, still low priority.
@@ -261,8 +268,8 @@ customer-event-detection/
 
 ## CI/CD Status
 - GitHub Actions workflow `ci.yml`: lint → format check → test, on push/PR to `main`
-- **Not yet re-confirmed green on `main` after Milestone 4 changes** — push and
-  confirm before considering Milestone 4 fully closed for CI purposes
+- ✅ **Confirmed green on `main`** after Milestone 4 changes, including the
+  `spark`/`display` lint fix (see Known Issues)
 - Still does not build/run Docker, Airflow, or touch Databricks (by design — no
   live credentials in CI)
 

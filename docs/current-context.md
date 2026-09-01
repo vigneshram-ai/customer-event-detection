@@ -10,8 +10,12 @@ below). Milestone 5 has **not** started.
 
 ## What Is Actually True Right Now
 - The repo exists locally and on GitHub (`main` branch).
-- **CI has not been re-confirmed green on `main` after Milestone 4's changes** —
-  push and check before treating CI as verified for this milestone.
+- **CI is confirmed green on `main`** after Milestone 4's changes. One lint fix was
+  needed along the way: `ruff` flagged `spark`/`display` as undefined names in
+  `notebooks/bronze_ingestion.py` (they're Databricks-runtime-injected globals, not
+  real imports). Fixed with `from databricks.sdk.runtime import display, spark` —
+  Databricks' own documented pattern for this, doesn't create a second Spark
+  session at runtime. Notebook re-verified after the fix with identical output.
 - Local Airflow (Docker Compose, `LocalExecutor`) is still running with only the
   temporary smoke-test DAG. Not orchestrating anything real yet — deliberately
   deferred to Milestone 12.
@@ -100,8 +104,8 @@ below). Milestone 5 has **not** started.
   explicitly rather than silently working around it later.
 
 ## Immediate Next Step
-Push Milestone 4 changes and confirm CI is green on `main`. Then start **Milestone
-5: Silver-layer cleaning and validation** — this requires first explicitly
+Milestone 4 is fully closed — CI confirmed green, all output verified. Next up is
+**Milestone 5: Silver-layer cleaning and validation** — this requires first explicitly
 designing: (1) the `merchant_category` NULL-handling rule, (2) the real
 data-quality gates to apply, (3) where/how `event_timestamp` gets parsed, and (4)
 referential integrity checks between `events` and `customers`. Do not begin without
