@@ -1,11 +1,14 @@
 # Project Status — Customer Event Detection ML Solution
 
-_Last updated: End of Milestone 5_
+_Last updated: End of Milestone 6_
 
-_Milestone 5 status: IMPLEMENTED AND VERIFIED — fully closed, CI green, real
-end-to-end run against live Databricks confirmed 0% reject rate on both tables.
-One deliberate technical-debt trade-off documented (amount NULL-vs-0.0, see
-ADR-011)._
+_Milestone 6 status: IMPLEMENTED AND VERIFIED — fully closed, CI green, real
+end-to-end run against live Databricks confirmed exact row-count reconciliation
+and correct feature applicability across all event types. Two
+design-vs-implementation discrepancies were caught during live verification and
+corrected before closing the milestone (see ADR-012). One feature
+(time-of-day deviation) was implemented, then deliberately dropped after its
+complexity was seen firsthand._
 
 ## Status Legend
 - ✅ IMPLEMENTED & VERIFIED — built, run, and confirmed working by the user with observed output
@@ -48,7 +51,7 @@ ADR-011)._
   1,000 rows, `ced.bronze.events` — 27,128 rows.
 - Known limitation investigated and accepted: Databricks' Photon CSV reader
   converts intentional empty-string `merchant_category` values to `NULL`. Deferred
-  to Silver (resolved in Milestone 5 — see below).
+  to Silver (resolved in Milestone 5).
 - First production dependencies added: `databricks-sdk`, `python-dotenv`. Secrets
   in git-ignored `.env`.
 - Full test suite: 31 passed, `ruff check`/`ruff format --check` clean, CI
@@ -59,70 +62,114 @@ ADR-011)._
 - **Design decisions resolved and documented in ADR-011**: validation mechanism
   (PySpark-native, not Great Expectations/Pandera/DLT expectations) and failure
   handling (quarantine to a `_rejects` table, not hard-fail or silent drop).
-- `notebooks/silver_transformation.py` — new Databricks notebook, same
-  plain-text "source" format and `CATALOG`/audit-column conventions as Bronze.
-  - `validate_customers()`: required-field null checks, `account_age_days >= 0`,
-    `customer_id` uniqueness (window function).
-  - `validate_events()`: required-field null checks, `event_type` enum validation
-    against the 9 known values, `event_timestamp` parsed from `StringType` to
-    `TimestampType` using an explicitly pinned format (`yyyy-MM-dd'T'HH:mm:ss`,
-    matching the generator's confirmed `datetime.isoformat()` output — pinned
-    rather than relying on auto-detection so a future format drift fails loudly
-    as rejects, not silently), `amount` consistency rules (see technical debt
-    below), `merchant_category` required only for monetary event types,
-    `event_id` uniqueness, and referential integrity against the *cleaned* Silver
-    `customers` set (not raw Bronze — an event referencing an already-rejected
-    customer is itself rejected).
-  - Every row lands in exactly one of `<table>` or `<table>_rejects`; each write
-    reconciles `valid_count + rejects_count == bronze_input_count` and raises if
-    they don't match.
-  - `_rejection_reasons` is an array per row (a row can fail multiple rules at
-    once) plus a `_validated_at` audit timestamp.
-- **`merchant_category` NULL caveat from ADR-010 formally resolved**: NULL is
-  valid/expected for the 6 non-monetary event types; only flagged when NULL on a
-  monetary event type.
-- **New issue found and resolved during verification**: the M3 generator writes a
-  literal `0.0` (not NULL/blank) as its default `amount` for non-monetary events —
-  first surfaced as a 34.92% reject rate (9,473 of 27,128 events) all rejected
-  for `amount_present_for_non_monetary_event`. Confirmed via raw CSV inspection
-  (literal `0` in the file, not blank) before deciding a fix. Resolved by
-  **relaxing the Silver rule to accept `0.0`** as the valid non-monetary sentinel,
-  rather than regenerating M3 data — a deliberate trade-off, not a silent patch.
-  Full rationale and consequences in ADR-011.
-- One implementation fix during development: `silver_customers.cache()` was
-  removed after Databricks raised `NOT_SUPPORTED_WITH_SERVERLESS` —
-  `persist()`/`cache()` isn't available on serverless compute (no persistent
-  executor memory to pin into). Not architecturally significant — the DataFrame
-  was only consumed once, so caching bought nothing anyway.
-- **Real end-to-end run verified** against live Databricks after the `amount` fix:
-  - `ced.silver.customers` — 1,000 valid, 0 rejected (0.00%)
-  - `ced.silver.events` — 27,128 valid, 0 rejected (0.00%)
-  - Rejection-reason breakdown queries confirmed empty for both tables.
-- `uv run ruff check .` / `uv run ruff format --check .` — both clean (user-confirmed).
-- No automated test coverage for `silver_transformation.py`, consistent with
-  Bronze — Databricks/Spark-only code, no local PySpark harness in this project.
+- `notebooks/silver_transformation.py` — customer and event validation, referential
+  integrity against cleaned customers, quarantine to `_rejects` tables with
+  `_rejection_reasons` arrays, row-count reconciliation on every write.
+- `merchant_category` NULL caveat from ADR-010 formally resolved (NULL valid for
+  6 non-monetary event types, flagged only on monetary types).
+- `amount = 0.0` accepted as the non-monetary sentinel value (not regenerated at
+  source) — deliberate trade-off, documented in ADR-011.
+- `.cache()` removed after `NOT_SUPPORTED_WITH_SERVERLESS` on Databricks Free
+  Edition serverless compute.
+- **Real end-to-end run verified**: `ced.silver.customers` — 1,000 valid, 0
+  rejected; `ced.silver.events` — 27,128 valid, 0 rejected.
+- `uv run ruff check .` / `uv run ruff format --check .` — both clean.
+- No automated test coverage, consistent with Bronze — Databricks/Spark-only code.
+
+**Milestone 6 — Gold-layer feature engineering**
+- **Design decisions resolved and documented in ADR-012**: leakage-boundary
+  convention, amount-feature applicability rule, the `normal_device`-counts-
+  as-known definition for `is_new_device`, empty-window-frame count semantics,
+  and the decision to implement-then-drop time-of-day deviation.
+- `notebooks/gold_feature_engineering.py` — new Databricks notebook, same
+  plain-text "source" format and `CATALOG`/audit-column conventions as Bronze
+  and Silver.
+  - Joins `ced.silver.events` to `ced.silver.customers` (inner join; verified
+    row-count-preserving, as guaranteed by Silver's referential-integrity check).
+  - **Eight features shipped**, computed via PySpark window functions:
+    - `prior_event_count_7d` — rolling 7-day event count (time-bounded range window)
+    - `prior_avg_amount_90d` — rolling 90-day avg amount, monetary event types only
+    - `amount_deviation_from_prior_avg` — amount minus rolling avg, monetary only
+    - `is_new_device` — device is neither `normal_device` nor previously observed
+    - `is_unusual_channel` — channel differs from customer's `normal_channel`
+    - `is_unusual_country` — event country differs from customer's `home_country`
+      (a country-mismatch proxy, not a true geo-distance metric)
+    - `prior_failed_login_count_24h` — rolling 24h count of `failed_login`
+      events, applies regardless of the current row's own event type
+    - `time_since_last_event_seconds` — via `lag()`, NULL on a customer's first event
+  - **Leakage rule enforced throughout**: every window (`rowsBetween`/
+    `rangeBetween`) ends at `-1` relative to the current row — no feature ever
+    sees its own event.
+  - Row-count reconciliation: Gold output must exactly match Silver input count
+    (no quarantine step at this layer — a mismatch here indicates a bug, e.g. a
+    join fan-out, not a data-quality failure).
+- **Two design-vs-implementation discrepancies caught during live verification**,
+  both fixed before closing the milestone — full detail in ADR-012:
+  1. `prior_avg_amount_90d` initially gated only the rolling window's *input*
+     on `event_type`, not the *emitted value* — non-monetary events (e.g.
+     `login`) received a real number reflecting monetary history instead of
+     `NULL`. Caught by inspecting sanity-check output (non-monetary null
+     counts didn't equal row counts). **Fixed** by gating the emitted value on
+     the current row's own `event_type` as well.
+  2. `prior_failed_login_count_24h` initially returned `NULL` (not `0`) for
+     ~70% of rows (19,062 of 27,128) whenever a customer had no failed-login
+     history in the preceding 24 hours. Root cause: **Spark's `SUM` over an
+     empty window frame returns `NULL`, not the identity value `0`** —
+     general Spark behavior, not specific to this dataset. Caught the same
+     way — the sanity check expected `0` nulls and got 19,062. **Fixed** with
+     `F.coalesce(..., F.lit(0))`.
+- **Time-of-day deviation was implemented (circular-statistics hour-angle
+  approach), then deliberately removed** before final verification — the
+  complexity wasn't justified without a concrete downstream need yet. Cut
+  after seeing the actual implementation, not before. Documented as a
+  reusable draft approach in ADR-012 if revisited later.
+- **Real end-to-end run verified** against live Databricks, after both fixes:
+  - `ced.gold.customer_events_features` — 27,128 rows, exact 1:1 reconciliation
+    with `ced.silver.events` (0% row loss).
+  - `is_new_device`: 229 true (~0.8%); `is_unusual_channel`: 128 true (~0.5%);
+    `is_unusual_country`: 128 true (~0.5%).
+  - `time_since_last_event_seconds` NULL exactly 1,000 times — one per
+    customer's first event, confirming correct per-customer window scoping.
+  - `prior_failed_login_count_24h` NULL count: **0** (confirmed after the
+    coalesce fix — was 19,062 before).
+  - `prior_avg_amount_90d` / `amount_deviation_from_prior_avg`: confirmed 100%
+    NULL for every non-monetary event type (`beneficiary_added`,
+    `device_changed`, `failed_login`, `login`, `password_changed`,
+    `profile_changed`) — row count exactly equals null count in each case.
+    Monetary types (`card_transaction`, `payment`, `transfer`) show partial
+    nulls only, corresponding to events before each customer's first monetary
+    transaction.
+- `uv run ruff check .` / `uv run ruff format --check .` — both clean.
+- CI confirmed green on this milestone's commit.
+- No automated test coverage, consistent with Bronze/Silver — Databricks/Spark-
+  only code, no local PySpark harness in this project.
 
 ### 🟡 Implemented, Not Fully Verified
 - None
 
 ### 📐 Designed Only
 - Full "Airflow vs. alternatives" rationale (ADR-002) — still not formally written.
-  Only the narrower executor/version decision (ADR-009) and the ingestion
-  mechanism decisions (ADR-010, ADR-011) exist.
+  Only the narrower executor/version decision (ADR-009) and the ingestion/
+  validation/feature-engineering decisions (ADR-010, ADR-011, ADR-012) exist.
+- Time-of-day deviation feature — implementation drafted and then removed;
+  approach documented in ADR-012 as a starting point, not verified end-to-end.
 
 ### ⏳ Future
-- Everything from Milestone 6 onward (Gold layer, feature engineering, MLflow,
-  batch inference, monitoring, security, full CI/CD, Airflow real orchestration at
-  Milestone 12).
+- Time-of-day deviation, if revisited — needs its own design-implement-verify
+  cycle per ADR-012.
+- Everything from Milestone 7 onward per the approved roadmap (baseline
+  detector, ML model, MLflow tracking/registry, batch inference, monitoring,
+  security, full CI/CD, Airflow real orchestration at Milestone 12).
 
 ---
 
 ## Current Work
-None in progress. Milestone 5 is closed.
+None in progress. Milestone 6 is closed.
 
 ## Pending Work
-Milestones 6–23 per the approved roadmap, starting with Gold-layer feature
-engineering.
+Milestones 7–23 per the approved roadmap, next up being the baseline
+detector / ML modeling stage. Not yet scoped in detail — do not begin without
+explicit user confirmation.
 
 ---
 
@@ -138,6 +185,13 @@ engineering.
 | Silver validation is PySpark-native (not Great Expectations/Pandera/DLT expectations) | **ADR-011** |
 | Silver failure handling is quarantine (valid + rejects tables), not hard-fail or silent drop | **ADR-011** |
 | `amount = 0.0` accepted as the non-monetary "not applicable" sentinel, instead of regenerating Milestone 3 data to use NULL | **ADR-011** (technical debt) |
+| Gold window features use windows ending at `-1` relative to the current row (no centered/symmetric windows) | **ADR-012** |
+| Amount-based Gold features are NULL for any non-monetary current-row event type, not just filtered on window input | **ADR-012** |
+| `is_new_device` treats a customer's declared `normal_device` as known from event zero, in addition to observed device history | **ADR-012** |
+| Gold layer has no quarantine/rejects path — row-count mismatch is treated as a bug, not a data-quality failure | **ADR-012** |
+| Window-based count features (`prior_failed_login_count_24h`) are coalesced to 0 on an empty window frame, not left as Spark's default NULL | **ADR-012** |
+| `is_unusual_country` is a country-mismatch proxy for geographic deviation, not a true distance metric | **ADR-012** |
+| Time-of-day deviation implemented then deliberately dropped from Milestone 6 scope after seeing its actual complexity | **ADR-012** |
 | `uv` over Poetry/pip | Recorded here only — tooling preference |
 | `ruff` for lint + format (single tool) | Recorded here only |
 | Ground-truth anomaly labels in a separate sidecar CSV | Recorded here only (Milestone 3) |
@@ -149,7 +203,7 @@ Full ADR-002 ("Airflow as the Orchestration Layer" broadly) remains pending.
 ---
 
 ## Known Issues
-- None blocking. CI confirmed green on `main` after Milestone 5 changes.
+- None blocking. CI confirmed green on `main` through Milestone 6.
 
 ## Technical Debt
 1. No pre-commit hook. Flagged since Milestone 1, still low priority.
@@ -160,24 +214,37 @@ Full ADR-002 ("Airflow as the Orchestration Layer" broadly) remains pending.
 4. Anomaly injection is single-event-level only (Milestone 3 scope decision).
 5. Only `new_device` anomaly type has event-type-aware logic (Milestone 3 scope
    decision).
-6. Bronze ingestion is not yet orchestrated by Airflow — both `upload_to_volume.py`
-   and `bronze_ingestion.py` are run manually. Deliberate, deferred to Milestone 12
-   per ADR-010.
-7. Bronze writes use `overwrite`, not `append` — no ingestion history is retained
-   across repeated runs. Acceptable at current scope; revisit if incremental
-   semantics become relevant.
-8. **New**: `amount = 0.0` is indistinguishable from a genuinely zero-value
-   monetary transaction for non-monetary event types, from Silver onward. Root
-   cause is the M3 generator's default value choice (`0.0`, not `None`), not a
-   Silver bug. Deliberately not fixed at the source to avoid reopening a verified
-   milestone. Revisit by fixing `event_generator.py` if Milestone 6+ feature
-   engineering (e.g. `amount_spike` detection) needs the distinction. Full
-   rationale in ADR-011.
-9. **New**: Silver ingestion is not yet orchestrated by Airflow — same deferral as
-   Bronze, per Milestone 12.
-10. **New**: `silver_transformation.py` has no automated test coverage, same
-    reasoning as `bronze_ingestion.py` (Databricks/Spark-only code, no local
-    PySpark harness in this project).
+6. Bronze ingestion is not yet orchestrated by Airflow — deliberate, deferred to
+   Milestone 12 per ADR-010.
+7. Bronze writes use `overwrite`, not `append` — no ingestion history retained
+   across repeated runs. Acceptable at current scope.
+8. `amount = 0.0` is indistinguishable from a genuinely zero-value monetary
+   transaction for non-monetary event types, from Silver onward. Root cause is
+   the M3 generator's default value choice, not a Silver bug. Full rationale in
+   ADR-011. **Note (Milestone 6): this ambiguity does not propagate into Gold's
+   amount features**, since those are now NULL (not 0.0) for all non-monetary
+   events regardless of the Silver-layer sentinel — see ADR-012.
+9. Silver ingestion is not yet orchestrated by Airflow — same deferral as Bronze,
+   per Milestone 12.
+10. `silver_transformation.py` has no automated test coverage (Databricks/
+    Spark-only code, no local PySpark harness in this project).
+11. `gold_feature_engineering.py` has no automated test coverage, same
+    reasoning as Bronze/Silver.
+12. Time-of-day deviation is undesigned-for-shipping — a circular-statistics
+    approach was drafted and removed; if revisited, treat it as a fresh
+    design-implement-verify cycle, not a resurrection of the removed code.
+    See ADR-012.
+13. Gold-layer feature values (`is_new_device`, `is_unusual_channel`,
+    `is_unusual_country`, etc.) have not been cross-referenced against
+    `events_ground_truth.csv` (the M3 anomaly labels). Current verification is
+    limited to structural sanity checks (row counts, null-count patterns
+    matching the applicability rules), not correctness against known-anomalous
+    events. Deliberately deferred — flagged as sufficient by user for closing
+    Milestone 6, worth revisiting once a detector actually consumes these
+    features.
+14. `is_unusual_country` is a country-level mismatch proxy, not a true
+    geo-distance calculation — the data model has no lat/long. Any future
+    interpretation of this feature should account for that limitation.
 
 ---
 
@@ -193,10 +260,10 @@ Full ADR-002 ("Airflow as the Orchestration Layer" broadly) remains pending.
 | Git version | 2.55.0.windows.4 | ✅ Verified |
 | Databricks workspace | Free Edition, `https://dbc-01205ae9-f87b.cloud.databricks.com/`, serverless compute only | ✅ Verified |
 | Unity Catalog catalog | `ced` (lowercase — UC normalizes catalog names) | ✅ Verified |
-| Unity Catalog schemas | `ced.bronze`, `ced.silver` | ✅ Verified |
+| Unity Catalog schemas | `ced.bronze`, `ced.silver`, `ced.gold` | ✅ Verified |
 | Unity Catalog volume | `ced.bronze.raw_uploads` | ✅ Verified |
 
-## Repository Structure (as of Milestone 5)
+## Repository Structure (as of Milestone 6)
 ```text
 customer-event-detection/
 ├── README.md
@@ -213,7 +280,8 @@ customer-event-detection/
 │ ├── adr/
 │ │ ├── ADR-009-airflow-local-dev-topology.md
 │ │ ├── ADR-010-local-to-databricks-bronze-ingestion.md
-│ │ └── ADR-011-silver-data-quality-strategy.md
+│ │ ├── ADR-011-silver-data-quality-strategy.md
+│ │ └── ADR-012-gold-feature-engineering-strategy.md
 │ ├── security/ (empty)
 │ ├── governance/ (empty)
 │ ├── mlops/ (empty)
@@ -226,7 +294,8 @@ customer-event-detection/
 │ └── upload_to_volume.py
 ├── notebooks/
 │ ├── bronze_ingestion.py
-│ └── silver_transformation.py
+│ ├── silver_transformation.py
+│ └── gold_feature_engineering.py
 ├── data_quality/ (empty)
 ├── feature_engineering/ (empty)
 ├── training/ (empty)
@@ -267,11 +336,13 @@ customer-event-detection/
 ## Databricks Status
 - Edition: Free Edition, serverless compute only (no `persist()`/`cache()`
   support — confirmed during Milestone 5 via `NOT_SUPPORTED_WITH_SERVERLESS`)
-- Catalog: `ced`; Schemas: `bronze`, `silver`
+- Catalog: `ced`; Schemas: `bronze`, `silver`, `gold`
 - Bronze tables: `ced.bronze.customers` (1,000 rows), `ced.bronze.events`
   (27,128 rows)
 - Silver tables: `ced.silver.customers` (1,000 valid, 0 rejects),
   `ced.silver.events` (27,128 valid, 0 rejects)
+- Gold tables: `ced.gold.customer_events_features` (27,128 rows, exact
+  1:1 reconciliation with Silver events, 8 features)
 - Notebook execution: manual (Run All), not yet orchestrated
 
 ## Airflow Status
@@ -283,21 +354,22 @@ customer-event-detection/
 - Framework: `pytest`
 - Current coverage: environment (2), customer generator (7), event generator
   (19), upload-to-volume (3) — **31 total**, unchanged since Milestone 4
-- Neither `bronze_ingestion.py` nor `silver_transformation.py` has automated test
-  coverage (Spark/Databricks-only code, no local PySpark harness in this project)
+- Neither `bronze_ingestion.py`, `silver_transformation.py`, nor
+  `gold_feature_engineering.py` has automated test coverage (Spark/Databricks-only
+  code, no local PySpark harness in this project)
 
 ## Linting/Formatting Setup
 - Tool: `ruff` (single tool for both)
 - Verified commands: `uv run ruff check .`, `uv run ruff format --check .` — both
-  clean as of Milestone 5 changes, confirmed both locally and in CI
+  clean as of Milestone 6 changes, confirmed both locally and in CI
 
 ## CI/CD Status
 - GitHub Actions workflow `ci.yml`: lint → format check → test, on push/PR to `main`
-- ✅ **Confirmed green on `main` after Milestone 5 changes**
+- ✅ Confirmed green on `main` through Milestone 6
 - Still does not build/run Docker, Airflow, or touch Databricks (by design — no
   live credentials in CI)
 
-## Commands Used to Verify Milestone 5
+## Commands Used to Verify Milestone 6
 ```powershell
 uv run ruff check .
 uv run ruff format --check .
@@ -305,17 +377,30 @@ uv run ruff format --check .
 (Databricks notebook run manually via "Run All" in the Databricks workspace —
 no local execution path, no local PySpark harness.)
 
-Observed output (Databricks notebook, `notebooks/silver_transformation.py`, Run All,
-after the `amount = 0.0` rule fix):
+Observed output (Databricks notebook, `notebooks/gold_feature_engineering.py`,
+Run All, final version after both fixes):
 ```
-OK: ced.silver.customers -- 1,000 valid, ced.silver.customers_rejects -- 0 rejected (0.00% reject rate)
-OK: ced.silver.events -- 27,128 valid, ced.silver.events_rejects -- 0 rejected (0.00% reject rate)
+OK: 27128 Gold rows reconcile exactly with 27128 Silver events.
+Wrote 27128 rows to ced.gold.customer_events_features
 ```
-Rejection-reason breakdown queries for both `events_rejects` and
-`customers_rejects` returned zero rows.
+Sanity-check output:
+```
+null_time_since_last_event_count: 1000
+null_prior_failed_login_count: 0
+new_device_true_count: 229
+unusual_channel_true_count: 128
+unusual_country_true_count: 128
+```
+Per-event-type breakdown confirmed 100% null `prior_avg_amount_90d` for all
+non-monetary event types (row_count == null_prior_avg_amount_count exactly for
+beneficiary_added, device_changed, failed_login, login, password_changed,
+profile_changed), and partial nulls only for monetary types (card_transaction:
+623/10880, payment: 217/4052, transfer: 160/2723 — corresponding to events
+before each customer's first monetary transaction).
 
 ---
 
 ## Next Recommended Task
-**Milestone 6: Gold-layer feature engineering.** Not started — do not begin
-without explicit confirmation.
+**Milestone 7: baseline detector / ML modeling stage** (per the approved
+23-milestone roadmap). Not started — do not begin without explicit
+confirmation.
