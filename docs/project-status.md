@@ -1,14 +1,14 @@
 # Project Status — Customer Event Detection ML Solution
 
-_Last updated: End of Milestone 6_
+_Last updated: End of Milestone 7_
 
-_Milestone 6 status: IMPLEMENTED AND VERIFIED — fully closed, CI green, real
-end-to-end run against live Databricks confirmed exact row-count reconciliation
-and correct feature applicability across all event types. Two
-design-vs-implementation discrepancies were caught during live verification and
-corrected before closing the milestone (see ADR-012). One feature
-(time-of-day deviation) was implemented, then deliberately dropped after its
-complexity was seen firsthand._
+_Milestone 7 status: IMPLEMENTED AND VERIFIED — rule-based baseline detector
+built, run end-to-end against live Databricks, and evaluated against
+Milestone 3 ground-truth anomaly labels for the first time in this project.
+One Spark null-semantics bug and one recurring `spark`-runtime-global bug
+were caught and fixed during verification. A structural (by-design, not a
+bug) recall gap on `channel_deviation` anomalies was identified, documented,
+and deliberately left untuned — see ADR-013._
 
 ## Status Legend
 - ✅ IMPLEMENTED & VERIFIED — built, run, and confirmed working by the user with observed output
@@ -144,32 +144,92 @@ complexity was seen firsthand._
 - No automated test coverage, consistent with Bronze/Silver — Databricks/Spark-
   only code, no local PySpark harness in this project.
 
+**Milestone 7 — Baseline rule-based detector**
+- **Design decisions resolved and documented in ADR-013**: additive point-
+  scoring vs. OR-logic, fixed-vs-swept thresholds (fixed, to avoid leakage
+  against ground truth), and detector-on-Databricks/evaluation-local split.
+- `notebooks/baseline_detector.py` — new Databricks notebook, reads
+  `ced.gold.customer_events_features`, applies a 7-rule additive point score
+  across 5 of the 8 Gold features (2 features — `prior_event_count_7d`,
+  `time_since_last_event_seconds` — deliberately excluded from scoring,
+  carried as context only).
+  - Output: `ced.gold.baseline_detections` — `customer_id`, `event_id`,
+    `event_timestamp`, `detection_score`, `detection_flag`, `reason`
+    (array<string>), `model_version` (`"baseline_rule_v1"`), `scored_at`,
+    plus two context-only columns.
+  - Row-count reconciliation: 27,128 output rows exactly match 27,128 Gold
+    input rows, no filtering (same no-quarantine convention as Gold).
+  - Exports a flattened CSV (`reason` array joined with `;`) to a new Unity
+    Catalog volume, `ced.gold.exports`, for local evaluation.
+- `evaluation/evaluate_baseline.py` — new local script. Downloads the export
+  via `databricks-sdk`, joins against `data/raw/events_ground_truth.csv` on
+  `event_id`, computes precision/recall/F1/false-positive-rate, and a recall
+  breakdown by `anomaly_type`. **First use of `pandas` in this project** —
+  added as a production dependency.
+- **Two bugs caught during live verification, both fixed before closing the
+  milestone** — full detail in ADR-013:
+  1. `F.array_remove(array, None)` silently nulled the entire `reason`
+     column on every row (Spark null-value-removal semantics, not a
+     null-filter). Caught because the exploded rule-frequency sanity check
+     came back empty. Fixed with `F.filter(array, lambda x: x.isNotNull())`.
+  2. `NameError: spark is not defined` — same root cause as the Milestone 4
+     Bronze notebook fix, now a confirmed recurring pattern in this project.
+     Fixed identically: `from databricks.sdk.runtime import spark`.
+- **Real end-to-end run verified** against live Databricks, then evaluated
+  against ground truth:
+  - `ced.gold.baseline_detections` — 27,128 rows, exact reconciliation.
+  - Score distribution: 26,589 rows at score 0; 136 at score 1; 403 at score
+    2 (no row exceeded score 2 in this dataset — no simultaneous multi-signal
+    events, consistent with the M3 generator's single-event-level anomaly
+    injection, technical debt #4).
+  - `detection_flag = True`: 403 rows (1.49%).
+  - **Precision: 1.0000, Recall: 0.7435, F1: 0.8529, FPR: 0.0000** — 403/403
+    flagged events were genuine injected anomalies (0 false positives across
+    27,128 events); 403/542 total injected anomalies caught.
+  - Recall by anomaly type: `new_device` 100% (229/229), `geo_deviation` 100%
+    (128/128), `amount_spike` 80.7% (46/57), `channel_deviation` **0%**
+    (0/128, structural limitation — see below).
+- **Known, deliberate limitation (not a bug, not retuned)**: `channel_deviation`
+  anomalies are structurally unreachable by this baseline. `is_unusual_channel`
+  correctly fires on all 128 such anomalies but is worth only 1 point against
+  a flag threshold of 2, and never co-occurs with another signal in this
+  dataset. Retained as an honest limitation and named motivator for
+  Milestone 8, per the explicit decision not to tune thresholds against
+  ground truth. Full rationale in ADR-013.
+- `uv run ruff check .` / `uv run ruff format --check .` — both clean after
+  the `spark` import fix.
+- CI confirmed green on this milestone's commit.
+- No automated test coverage for `baseline_detector.py`, consistent with
+  Bronze/Silver/Gold (Databricks/Spark-only code). `evaluate_baseline.py` is
+  local pure-Python — worth considering for test coverage in a future
+  milestone (not done yet).
+
 ### 🟡 Implemented, Not Fully Verified
 - None
 
 ### 📐 Designed Only
 - Full "Airflow vs. alternatives" rationale (ADR-002) — still not formally written.
   Only the narrower executor/version decision (ADR-009) and the ingestion/
-  validation/feature-engineering decisions (ADR-010, ADR-011, ADR-012) exist.
+  validation/feature-engineering/baseline-detector decisions (ADR-010,
+  ADR-011, ADR-012, ADR-013) exist.
 - Time-of-day deviation feature — implementation drafted and then removed;
   approach documented in ADR-012 as a starting point, not verified end-to-end.
 
 ### ⏳ Future
 - Time-of-day deviation, if revisited — needs its own design-implement-verify
   cycle per ADR-012.
-- Everything from Milestone 7 onward per the approved roadmap (baseline
-  detector, ML model, MLflow tracking/registry, batch inference, monitoring,
-  security, full CI/CD, Airflow real orchestration at Milestone 12).
+- Everything from Milestone 8 onward per the approved roadmap (ML model,
+  MLflow tracking/registry, batch inference, monitoring, security, full
+  CI/CD, Airflow real orchestration at Milestone 12).
 
 ---
 
 ## Current Work
-None in progress. Milestone 6 is closed.
+None in progress. Milestone 7 is closed.
 
 ## Pending Work
-Milestones 7–23 per the approved roadmap, next up being the baseline
-detector / ML modeling stage. Not yet scoped in detail — do not begin without
-explicit user confirmation.
+Milestones 8–23 per the approved roadmap, next up being the ML model stage.
+Not yet scoped in detail — do not begin without explicit user confirmation.
 
 ---
 
@@ -192,6 +252,9 @@ explicit user confirmation.
 | Window-based count features (`prior_failed_login_count_24h`) are coalesced to 0 on an empty window frame, not left as Spark's default NULL | **ADR-012** |
 | `is_unusual_country` is a country-mismatch proxy for geographic deviation, not a true distance metric | **ADR-012** |
 | Time-of-day deviation implemented then deliberately dropped from Milestone 6 scope after seeing its actual complexity | **ADR-012** |
+| Baseline detector uses fixed, additive point-scoring rules (not OR-logic), with thresholds reasoned individually and never swept against ground truth | **ADR-013** |
+| Baseline detector runs on Databricks; ground-truth evaluation runs locally against a CSV export, keeping ground truth out of the warehouse permanently | **ADR-013** |
+| `model_version` field name reused by the baseline (not `detector_version`) to establish the contract the eventual ML model and batch inference will share | **ADR-013** |
 | `uv` over Poetry/pip | Recorded here only — tooling preference |
 | `ruff` for lint + format (single tool) | Recorded here only |
 | Ground-truth anomaly labels in a separate sidecar CSV | Recorded here only (Milestone 3) |
@@ -203,7 +266,7 @@ Full ADR-002 ("Airflow as the Orchestration Layer" broadly) remains pending.
 ---
 
 ## Known Issues
-- None blocking. CI confirmed green on `main` through Milestone 6.
+- None blocking. CI confirmed green on `main` through Milestone 7.
 
 ## Technical Debt
 1. No pre-commit hook. Flagged since Milestone 1, still low priority.
@@ -235,16 +298,27 @@ Full ADR-002 ("Airflow as the Orchestration Layer" broadly) remains pending.
     design-implement-verify cycle, not a resurrection of the removed code.
     See ADR-012.
 13. Gold-layer feature values (`is_new_device`, `is_unusual_channel`,
-    `is_unusual_country`, etc.) have not been cross-referenced against
-    `events_ground_truth.csv` (the M3 anomaly labels). Current verification is
-    limited to structural sanity checks (row counts, null-count patterns
-    matching the applicability rules), not correctness against known-anomalous
-    events. Deliberately deferred — flagged as sufficient by user for closing
-    Milestone 6, worth revisiting once a detector actually consumes these
-    features.
+    `is_unusual_country`, etc.) had not been cross-referenced against
+    `events_ground_truth.csv` (the M3 anomaly labels) as of Milestone 6.
+    **Resolved in Milestone 7** via the baseline detector's evaluation
+    against ground truth — see items 15–16 below for what that evaluation
+    surfaced.
 14. `is_unusual_country` is a country-level mismatch proxy, not a true
     geo-distance calculation — the data model has no lat/long. Any future
     interpretation of this feature should account for that limitation.
+15. `channel_deviation`-only anomalies are structurally unreachable by the
+    Milestone 7 baseline detector (0% recall) — the responsible feature
+    fires correctly but is under-weighted relative to the flag threshold,
+    by deliberate design (not tuning against ground truth). Named as a
+    motivator for Milestone 8's ML model, not treated as a defect to fix
+    in the baseline. See ADR-013.
+16. `prior_failed_login_count_24h`-based rules in the baseline detector have
+    zero support in current ground truth (no injected login-burst anomaly
+    type exists per technical debt #5) — architecturally sound but
+    unverified against any known-anomalous case.
+17. `evaluation/evaluate_baseline.py` has no automated test coverage (local
+    pure-Python, unlike Bronze/Silver/Gold's Databricks-only justification —
+    worth reconsidering in a future milestone).
 
 ---
 
@@ -261,9 +335,9 @@ Full ADR-002 ("Airflow as the Orchestration Layer" broadly) remains pending.
 | Databricks workspace | Free Edition, `https://dbc-01205ae9-f87b.cloud.databricks.com/`, serverless compute only | ✅ Verified |
 | Unity Catalog catalog | `ced` (lowercase — UC normalizes catalog names) | ✅ Verified |
 | Unity Catalog schemas | `ced.bronze`, `ced.silver`, `ced.gold` | ✅ Verified |
-| Unity Catalog volume | `ced.bronze.raw_uploads` | ✅ Verified |
+| Unity Catalog volumes | `ced.bronze.raw_uploads`, `ced.gold.exports` | ✅ Verified |
 
-## Repository Structure (as of Milestone 6)
+## Repository Structure (as of Milestone 7)
 ```text
 customer-event-detection/
 ├── README.md
@@ -281,7 +355,8 @@ customer-event-detection/
 │ │ ├── ADR-009-airflow-local-dev-topology.md
 │ │ ├── ADR-010-local-to-databricks-bronze-ingestion.md
 │ │ ├── ADR-011-silver-data-quality-strategy.md
-│ │ └── ADR-012-gold-feature-engineering-strategy.md
+│ │ ├── ADR-012-gold-feature-engineering-strategy.md
+│ │ └── ADR-013-baseline-detector-design.md
 │ ├── security/ (empty)
 │ ├── governance/ (empty)
 │ ├── mlops/ (empty)
@@ -295,7 +370,10 @@ customer-event-detection/
 ├── notebooks/
 │ ├── bronze_ingestion.py
 │ ├── silver_transformation.py
-│ └── gold_feature_engineering.py
+│ ├── gold_feature_engineering.py
+│ └── baseline_detector.py
+├── evaluation/
+│ └── evaluate_baseline.py
 ├── data_quality/ (empty)
 ├── feature_engineering/ (empty)
 ├── training/ (empty)
@@ -305,7 +383,8 @@ customer-event-detection/
 │ └── raw/
 │   ├── customers.csv
 │   ├── events.csv
-│   └── events_ground_truth.csv
+│   ├── events_ground_truth.csv
+│   └── baseline_detections.csv (downloaded by evaluate_baseline.py, gitignored)
 ├── airflow/
 │ ├── docker-compose.yaml
 │ ├── .env
@@ -325,9 +404,11 @@ customer-event-detection/
 
 ## Installed Dependencies
 
-**Production** (unchanged since Milestone 4):
+**Production** (added `pandas` in Milestone 7):
 - `databricks-sdk>=0.133.0`
 - `python-dotenv>=1.2.3`
+- `pandas` (version per `uv add pandas` resolution — confirm exact pin from
+  `pyproject.toml`/`uv.lock`)
 
 **Dev**:
 - `pytest>=8.3.0`
@@ -342,7 +423,10 @@ customer-event-detection/
 - Silver tables: `ced.silver.customers` (1,000 valid, 0 rejects),
   `ced.silver.events` (27,128 valid, 0 rejects)
 - Gold tables: `ced.gold.customer_events_features` (27,128 rows, exact
-  1:1 reconciliation with Silver events, 8 features)
+  1:1 reconciliation with Silver events, 8 features), `ced.gold.baseline_detections`
+  (27,128 rows, new in Milestone 7)
+- Gold exports volume: `ced.gold.exports` (new in Milestone 7) — flattened
+  CSV export of `baseline_detections` for local evaluation
 - Notebook execution: manual (Run All), not yet orchestrated
 
 ## Airflow Status
@@ -354,53 +438,93 @@ customer-event-detection/
 - Framework: `pytest`
 - Current coverage: environment (2), customer generator (7), event generator
   (19), upload-to-volume (3) — **31 total**, unchanged since Milestone 4
-- Neither `bronze_ingestion.py`, `silver_transformation.py`, nor
-  `gold_feature_engineering.py` has automated test coverage (Spark/Databricks-only
-  code, no local PySpark harness in this project)
+- Neither `bronze_ingestion.py`, `silver_transformation.py`,
+  `gold_feature_engineering.py`, nor `baseline_detector.py` has automated
+  test coverage (Spark/Databricks-only code, no local PySpark harness in
+  this project). `evaluate_baseline.py` (local, pure-Python) also has no
+  automated test coverage yet — flagged as technical debt #17, not the same
+  justification as the Databricks-only notebooks.
 
 ## Linting/Formatting Setup
 - Tool: `ruff` (single tool for both)
 - Verified commands: `uv run ruff check .`, `uv run ruff format --check .` — both
-  clean as of Milestone 6 changes, confirmed both locally and in CI
+  clean as of Milestone 7 changes, confirmed both locally and in CI
 
 ## CI/CD Status
 - GitHub Actions workflow `ci.yml`: lint → format check → test, on push/PR to `main`
-- ✅ Confirmed green on `main` through Milestone 6
+- ✅ Confirmed green on `main` through Milestone 7
 - Still does not build/run Docker, Airflow, or touch Databricks (by design — no
   live credentials in CI)
 
-## Commands Used to Verify Milestone 6
+## Commands Used to Verify Milestone 7
 ```powershell
+uv add pandas
 uv run ruff check .
 uv run ruff format --check .
+uv run python evaluation/evaluate_baseline.py
 ```
 (Databricks notebook run manually via "Run All" in the Databricks workspace —
 no local execution path, no local PySpark harness.)
 
-Observed output (Databricks notebook, `notebooks/gold_feature_engineering.py`,
+Observed output (Databricks notebook, `notebooks/baseline_detector.py`,
 Run All, final version after both fixes):
 ```
-OK: 27128 Gold rows reconcile exactly with 27128 Silver events.
-Wrote 27128 rows to ced.gold.customer_events_features
+OK: 27128 baseline detections reconcile exactly with 27128 Gold rows.
+Wrote 27128 rows to ced.gold.baseline_detections
+
++---------------+-----+
+|detection_score|count|
++---------------+-----+
+|              0|26589|
+|              1|  136|
+|              2|  403|
++---------------+-----+
+
+detection_flag = True: 403 (1.49%)
+
++----------------------+-----+
+|rule                  |count|
++----------------------+-----+
+|is_new_device         |229  |
+|is_unusual_channel    |128  |
+|is_unusual_country    |128  |
+|amount_deviation_tier1|54   |
+|amount_deviation_tier2|46   |
++----------------------+-----+
+
+Exported 27128 rows to /Volumes/ced/gold/exports/baseline_detections.csv
 ```
-Sanity-check output:
+
+Observed output (`evaluation/evaluate_baseline.py`):
 ```
-null_time_since_last_event_count: 1000
-null_prior_failed_login_count: 0
-new_device_true_count: 229
-unusual_channel_true_count: 128
-unusual_country_true_count: 128
+Downloaded /Volumes/ced/gold/exports/baseline_detections.csv -> data\raw\baseline_detections.csv (1393029 bytes)
+
+=== Overall metrics ===
+tp: 403
+fp: 0
+fn: 139
+tn: 26586
+precision: 1.0000
+recall: 0.7435
+f1: 0.8529
+false_positive_rate: 0.0000
+
+=== Recall by anomaly_type ===
+                   count  caught    recall
+anomaly_type
+new_device           229     229  1.000000
+channel_deviation    128       0  0.000000
+geo_deviation        128     128  1.000000
+amount_spike          57      46  0.807018
 ```
-Per-event-type breakdown confirmed 100% null `prior_avg_amount_90d` for all
-non-monetary event types (row_count == null_prior_avg_amount_count exactly for
-beneficiary_added, device_changed, failed_login, login, password_changed,
-profile_changed), and partial nulls only for monetary types (card_transaction:
-623/10880, payment: 217/4052, transfer: 160/2723 — corresponding to events
-before each customer's first monetary transaction).
 
 ---
 
 ## Next Recommended Task
-**Milestone 7: baseline detector / ML modeling stage** (per the approved
-23-milestone roadmap). Not started — do not begin without explicit
-confirmation.
+**Milestone 8: ML model (baseline → real model)** per the approved
+23-milestone roadmap — likely a simple, explainable approach (Isolation
+Forest, Logistic Regression, or XGBoost per the project's stated ML scope),
+evaluated against the Milestone 7 baseline's precision/recall/F1 as the
+reference point to beat, with particular attention to `channel_deviation`
+recall given the baseline's structural 0% there. Not started — do not begin
+without explicit confirmation.
