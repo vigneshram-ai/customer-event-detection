@@ -1,16 +1,21 @@
 # Project Status — Customer Event Detection ML Solution
 
-_Last updated: End of Milestone 8_
+_Last updated: End of Milestone 9_
 
-_Milestone 8 status: IMPLEMENTED AND VERIFIED — LogisticRegression and
-XGBoost trained on the 8 Gold features against Milestone 3 ground-truth
-labels, tracked in Databricks-managed MLflow alongside a metrics-only
-reference run for the Milestone 7 baseline. LogisticRegression recovers the
-baseline's structural 0% recall on `channel_deviation` anomalies to 100%,
-while improving precision, recall, and F1 overall, and is the leading
-candidate — not yet promoted, since no formal promotion mechanism exists
-yet. Two limitations were identified and deliberately left as documented
-technical debt rather than fixed — see ADR-014 amendment._
+_Milestone 9 status: IMPLEMENTED AND VERIFIED (for LogisticRegression) —
+a validation gate reads already-logged Milestone 8 MLflow metrics for
+`ced.models.logistic_regression_detector`'s latest version (no
+recomputation) and checks three thresholds: `recall_channel_deviation`,
+overall `recall` (both >= 0.95), and `precision` (>= 0.90, deliberately
+below the M7 baseline's 1.0000 per Technical Debt #19's non-like-for-like
+basis). On pass, the version is promoted via a Unity Catalog model alias
+(`champion`) — UC's current alias-based mechanism, replacing the deprecated
+stage-based promotion. A full champion/challenger/previous_champion/
+archived alias policy is implemented for future retrains, but only the
+"no existing champion" branch has been exercised against live output so
+far — see ADR-015 for the specific IMPLEMENTED-NOT-YET-VERIFIED caveat on
+the comparison branch. XGBoost is deliberately excluded from the gate this
+milestone (see ADR-015)._
 
 ## Status Legend
 - ✅ IMPLEMENTED & VERIFIED — built, run, and confirmed working by the user with observed output
@@ -24,143 +29,121 @@ technical debt rather than fixed — see ADR-014 amendment._
 
 ### ✅ Implemented & Verified
 
-**Milestones 1–7** — unchanged from prior status; see git history / earlier
+**Milestones 1–8** — unchanged from prior status; see git history / earlier
 versions of this file for full detail. Summary: repo/environment setup,
 synthetic customer and event generators (1,000 customers, 27,128 events,
 542 injected anomalies), Bronze ingestion, Silver validation, Gold feature
-engineering (8 features, leakage-safe windows), and a rule-based baseline
-detector evaluated against ground truth (precision 1.0000, recall 0.7435,
-F1 0.8529, with a diagnosed 0% recall gap on `channel_deviation`).
+engineering (8 features, leakage-safe windows), rule-based baseline
+(precision 1.0000, recall 0.7435, F1 0.8529), and LogisticRegression +
+XGBoost trained on the 8 Gold features (precision 0.9879/recall
+1.0000/F1 0.9939 and precision 0.9581/recall 0.9816/F1 0.9697
+respectively), both registered to Unity Catalog.
 
-**Milestone 8 — ML model training (Logistic Regression + XGBoost)**
-- **Design decisions resolved and documented in ADR-014**, including a
-  deliberate, scoped refinement of ADR-010/013's ground-truth-exclusion
-  stance: ground truth may enter Databricks for training, but only into an
-  isolated schema (`ced.training`) that inference paths never read. The
-  join between features and labels happens in-memory only and is never
-  persisted to any catalog table.
-- **New Unity Catalog schema `ced.training`**, holding exactly one table:
-  `ced.training.ground_truth_labels` (`event_id`, `anomaly_type`,
-  `is_anomaly`). Populated via a **new, additive** upload path —
-  `training/upload_ground_truth.py` does not modify Milestone 4's
-  `ingestion/upload_to_volume.py`, which continues to deliberately exclude
-  ground truth from Bronze uploads.
-  - `notebooks/load_ground_truth.py` reads the uploaded CSV from
-    `/Volumes/ced/training/raw_labels/`, reads the CSV's actual
-    `is_synthetic_anomaly` column directly (renamed `is_anomaly`) rather
-    than deriving it from `anomaly_type`'s nullability — an early draft
-    made that derivation mistake and was corrected during design review,
-    before any live run.
-  - **Verified**: 27,128 rows loaded, exactly matching Gold's row count.
-    `anomaly_type` breakdown: `amount_spike` 57, `channel_deviation` 128,
-    `geo_deviation` 128, `new_device` 229 (sum 542, matching the M3/M7
-    verified anomaly total exactly). `is_anomaly` True/False counts:
-    542 / 26,586.
-- **New Unity Catalog schema `ced.models`**, deliberately separate from
-  `ced.training` — registered models must be loadable by future batch
-  inference, so they live outside the schema that's walled off from
-  inference paths.
-- `notebooks/train_model.py` — new Databricks notebook, installs `xgboost`
-  via `%pip install` (first time this project has needed a non-preinstalled
-  library on Free Edition serverless compute), joins Gold features to
-  `ced.training.ground_truth_labels` in-memory, performs a stratified 70/30
-  train/test split (by `anomaly_type`, seed 42), and trains/logs three
-  MLflow runs in experiment `/Shared/customer_event_detection_m8`:
-  - `baseline_rule_v1_reference` — the M7 baseline's already-verified
-    metrics, logged as params/metrics only (no model artifact, since it
-    isn't a fitted model), for direct comparison in the MLflow UI.
-  - `logistic_regression` — trained on all 8 Gold features,
-    `class_weight="balanced"`, registered as
-    `ced.models.logistic_regression_detector` v1.
-  - `xgboost` — trained on all 8 Gold features, `scale_pos_weight` set from
-    the train split's class ratio, registered as
-    `ced.models.xgboost_detector` v1.
-- **Three bugs caught and fixed before/during verification** — full detail
-  in ADR-014's amendment:
-  1. `is_anomaly` label-derivation mistake (see above), caught in design
-     review before any live run.
-  2. `F821 dbutils` undefined — same recurring runtime-global pattern as
-     `spark`/`display` in M4/M7 (now a confirmed fourth instance). Fixed
-     identically: explicit `from databricks.sdk.runtime import dbutils`.
-  3. `E402` module-level-import-order errors across the whole import block
-     — structural, not sloppiness: Databricks' required
-     `%pip install` → `dbutils.library.restartPython()` → import sequence
-     puts real code before imports by design. Resolved with a scoped
-     `ruff` `per-file-ignores` entry for `notebooks/*.py` on `E402` only
-     (not a blanket ignore, and `F821` stays fixed via explicit import as
-     always).
-  4. `AttributeError: 'bytes' object has no attribute 'seekable'` in
-     `training/upload_ground_truth.py` — `WorkspaceClient.files.upload`
-     requires a seekable file-like object, not raw `bytes`. Fixed by
-     wrapping the read file contents in `io.BytesIO(...)`.
-- **Real end-to-end run verified** against live Databricks:
-  - Gold→joined row-count reconciliation: 27,128 = 27,128, no fan-out.
-  - Split: train 18,989 rows (normal 18,610; new_device 160; geo_deviation
-    90; channel_deviation 89; amount_spike 40), test 8,139 rows (normal
-    7,976; new_device 69; channel_deviation 39; geo_deviation 38;
-    amount_spike 17).
-  - **LogisticRegression** (test split, n=8,139): precision 0.9879, recall
-    1.0000, F1 0.9939. Recall by type: new_device 1.000, geo_deviation
-    1.000, amount_spike 1.000, **channel_deviation 1.000**.
-  - **XGBoost** (test split, n=8,139): precision 0.9581, recall 0.9816, F1
-    0.9697. Recall by type: new_device 1.000, geo_deviation 1.000,
-    amount_spike 0.8235, **channel_deviation 1.000**.
-  - Both models registered successfully to the Unity Catalog model
-    registry on first attempt — confirms Free Edition supports this,
-    previously unverified.
-- **Headline result**: LogisticRegression recovers `channel_deviation`
-  recall from the baseline's structural 0% to 100%, while also improving
-  overall precision, recall, and F1 versus the baseline. **Decision:
-  LogisticRegression is the leading candidate** — "registered" here means
-  logged as a versioned UC artifact, not promoted to any production
-  alias/stage, since a formal validation-gate/promotion mechanism doesn't
-  exist yet (MLOps-lifecycle scope, not yet built). XGBoost remains logged
-  and comparable, not discarded, but underperforms LR on every metric,
-  most notably `amount_spike` recall (0.8235 vs. 1.000).
-- **Two limitations identified and left as documented technical debt, not
-  fixed** — see Technical Debt items 18–19 below and ADR-014's amendment.
-- `uv run ruff check .` / `uv run ruff format --check .` — both clean
-  (after the `E402` per-file-ignore addition). `uv run pytest` — all
-  passing, including 3 new tests for `training/upload_ground_truth.py`.
-- CI confirmed green on this milestone's commit.
-- No automated test coverage for `load_ground_truth.py` or
-  `train_model.py` (Databricks/Spark-only notebooks, consistent with
-  Bronze/Silver/Gold/baseline-detector — no local PySpark harness in this
-  project). `training/upload_ground_truth.py` has 3 tests, same pattern as
-  `upload_to_volume.py`.
+**Milestone 9 — Model validation gate and promotion**
+- **Design decisions resolved and documented in ADR-015**, covering: gate
+  threshold selection and rationale (why precision's floor is below the
+  baseline's), alias-based promotion (UC deprecated stage-based
+  promotion), the champion/challenger/previous_champion/archived alias
+  semantics (all project-defined conventions, not UC built-ins), the
+  decision to compare challenger vs. champion on F1 with ties favoring
+  the incumbent, and the deliberate exclusion of XGBoost from this
+  milestone's gate.
+- **`notebooks/validate_and_promote_model.py`** — new Databricks notebook.
+  Resolves the *latest* registered version of
+  `ced.models.logistic_regression_detector` dynamically (not a hardcoded
+  run name or version number, so it remains correct across future
+  retrains), reads that version's already-logged MLflow metrics, applies
+  the three-check gate, and on pass:
+  - No existing `champion` → promotes the version directly.
+  - A different `champion` exists → tags the version `challenger`
+    immediately (this is what defines it as a challenger), then compares
+    it to the champion on F1: strictly greater F1 promotes it to
+    `champion` (outgoing champion tagged `previous_champion`, `challenger`
+    alias retired); equal-or-lower F1 removes the `challenger` alias and
+    tags the version `archived` instead (this project runs one-shot batch
+    comparison, not live shadow evaluation, so a losing version has no
+    honest "still being evaluated" state to hold).
+  - Gate failure aborts entirely — no alias touched, non-zero exit.
+- **Real run verified** against live Databricks (Free Edition), first-ever
+  run against `logistic_regression_detector` (no prior `champion`
+  existed):
+  [PASS] recall_channel_deviation: 1.0000 (threshold >= 0.95)
+  [PASS] recall: 1.0000 (threshold >= 0.95)
+  [PASS] precision: 0.9879 (threshold >= 0.90)
+
+  GATE PASSED — no existing champion. v1 promoted directly to 'champion'.
+
+  Final registered aliases:
+  champion -> v1
+
+    Confirms Free Edition supports `set_registered_model_alias` /
+  `get_registered_model(...).aliases` — previously unverified, same
+  pattern as M8's confirmation that model registration itself worked.
+- **XGBoost remains registered but outside this milestone's gate** —
+  deliberate scope decision (see ADR-015), not an oversight; it
+  underperforms LogisticRegression on every M8 metric.
+- **Design iteration caught three real gaps before implementation was
+  finalized** (all resolved in the version above, not left as debt):
+  1. An earlier draft assumed a 1:1 run-to-version mapping (looking up
+     model version by `run_id` filtered on a fixed run *name*) — would
+     have broken on the first retrain, since retraining produces new runs
+     with new `run_id`s and the same name. Fixed by resolving the latest
+     *registered version* directly via `search_model_versions`, then
+     working backward to its run — no assumption about run naming at all.
+  2. An earlier draft implemented `champion`-only promotion with no
+     `challenger` concept — discarded the standard champion/challenger
+     MLOps pattern for no architectural reason. Fixed by adding the
+     comparison-on-F1 logic above.
+  3. An earlier draft assigned the `challenger` alias only *after* losing
+     a comparison — meaning the alias's real, forward-looking meaning
+     ("currently being evaluated against champion") was never actually
+     represented, and a losing version silently overwrote any prior
+     `challenger` regardless of relative merit. Fixed by assigning
+     `challenger` immediately on gate-pass (before comparison), and
+     retagging losers `archived` instead of leaving them mislabeled
+     `challenger` indefinitely.
 
 ### 🟡 Implemented, Not Fully Verified
-- None
+- **`validate_and_promote_model.py`'s champion-vs-challenger comparison
+  branch** (F1 tie-break, `previous_champion` tagging, `challenger`/
+  `archived` handling) — implemented and reasoned in ADR-015, but not yet
+  exercised against live output. The only run so far took the
+  "no existing champion" path (since none existed). Verifying the
+  comparison branch requires a second model version (e.g. a deliberate
+  retrain) — flagged as a follow-up verification step, not new milestone
+  scope.
 
 ### 📐 Designed Only
 - Full "Airflow vs. alternatives" rationale (ADR-002) — still not formally written.
 - Time-of-day deviation feature — implementation drafted and then removed;
   approach documented in ADR-012, not verified end-to-end.
 - `ced.training` schema access restricted to a training-job identity,
-  distinct from an inference-job identity that can't read it — the
-  intended RBAC boundary per ADR-014, but Free Edition is single-user, so
-  this specific access split cannot actually be enforced or demonstrated
-  here.
-- Formal model validation-gate / promotion mechanism (moving a model from
-  "registered" to a production alias/stage) — not yet built. Milestone 8
-  registers models; it does not promote them.
+  distinct from an inference-job identity — the intended RBAC boundary
+  per ADR-014, but Free Edition is single-user, so this cannot actually be
+  enforced or demonstrated.
+- Live/shadow evaluation for the champion/challenger pattern (running a
+  challenger against real inference traffic before deciding) — the
+  current implementation is one-shot batch comparison only; genuine shadow
+  evaluation would require batch inference to exist first (Milestone 10+).
 
 ### ⏳ Future
 - Time-of-day deviation, if revisited — needs its own design-implement-verify
   cycle per ADR-012.
-- Milestone 9 onward per the approved roadmap: model validation/promotion,
-  batch inference against new events, monitoring, security, full CI/CD,
-  Airflow real orchestration at Milestone 12.
+- Verifying the champion/challenger comparison branch with a real second
+  model version.
+- Milestone 10 onward per the approved roadmap: batch inference against
+  new events (querying `@champion` directly), monitoring, security, full
+  CI/CD, Airflow real orchestration at Milestone 12.
 
 ---
 
 ## Current Work
-None in progress. Milestone 8 is closed.
+None in progress. Milestone 9 is closed for LogisticRegression.
 
 ## Pending Work
-Milestones 9–23 per the approved roadmap, next up being model
-validation/promotion and batch inference. Not yet scoped in detail — do
-not begin without explicit user confirmation.
+Milestones 10–23 per the approved roadmap, next up being batch inference
+against new customer events using the `@champion` alias. Not yet scoped in
+detail — do not begin without explicit user confirmation.
 
 ---
 
@@ -191,6 +174,11 @@ not begin without explicit user confirmation.
 | Registered models live in a schema (`ced.models`) separate from `ced.training`, since they must be reachable by inference while `ced.training` must not be | **ADR-014** |
 | All 8 Gold features given to both ML models (unlike the baseline's 6-feature scope) — a learned model can down-weight an unhelpful feature instead of a human excluding it in advance | **ADR-014** |
 | LogisticRegression named leading candidate over XGBoost, based on across-the-board better verified metrics; neither promoted to a production alias, since no promotion mechanism exists yet | **ADR-014** (amendment) |
+| Model validation gate reads already-logged metrics (no recomputation); three thresholds — `recall_channel_deviation`/`recall` >= 0.95, `precision` >= 0.90 (deliberately below baseline's 1.0000, non-like-for-like basis) | **ADR-015** |
+| Promotion via Unity Catalog model aliases (`champion`/`challenger`/`previous_champion`/`archived`), not deprecated stage-based promotion; alias semantics are project-defined conventions, not UC built-ins | **ADR-015** |
+| Champion vs. challenger comparison uses F1 (single decisive metric, already logged), ties favor the incumbent champion | **ADR-015** |
+| `challenger` alias assigned on gate-pass, before comparison (not as a post-hoc loser label); losers retagged `archived` instead of indefinitely mislabeled `challenger`, since this project implements one-shot batch comparison, not live shadow evaluation | **ADR-015** |
+| XGBoost deliberately excluded from Milestone 9's gate — underperforms LogisticRegression on every M8 metric | **ADR-015** |
 | `uv` over Poetry/pip | Recorded here only — tooling preference |
 | `ruff` for lint + format (single tool) | Recorded here only |
 | Ground-truth anomaly labels in a separate sidecar CSV | Recorded here only (Milestone 3) |
@@ -200,32 +188,22 @@ Full ADR-002 ("Airflow as the Orchestration Layer" broadly) remains pending.
 ---
 
 ## Known Issues
-- None blocking. CI confirmed green on `main` through Milestone 8.
+- None blocking. CI confirmed green on `main` through Milestone 8 (Milestone 9's notebook has no automated test coverage — Databricks/Spark-only, consistent with the project's stated no-local-PySpark-harness pattern).
 
 ## Technical Debt
-1–17. Unchanged from Milestone 7 — see prior version of this file / git
-history for full text (pre-commit hooks, Airflow DAG stack not CI-tested,
-single-event-level anomaly injection, `amount = 0.0` sentinel ambiguity,
-`channel_deviation` baseline gap now addressed by Milestone 8's ML model,
-`prior_failed_login_count_24h` unverified against any known-anomalous case,
-`evaluate_baseline.py` untested, etc.)
-18. **Milestone 8's train/test split is row-level, not customer-level.** A
-    single customer's events can appear in both the train and test splits.
-    Harmless for `new_device`, `channel_deviation`, and `geo_deviation`
-    (near-deterministic booleans, independent of a customer's other rows).
-    A genuine gap for `amount_spike`, which depends on
-    `prior_avg_amount_90d` — a customer-specific rolling baseline — so a
-    customer's spike row in test could be evaluated against a baseline
-    partly informed by that same customer's rows in train. Deliberately
-    left as-is; if revisited, needs a customer-grouped split, not a
-    parameter change to the current one.
-19. **Milestone 7 baseline metrics and Milestone 8 model metrics are not
-    computed on an identical basis.** The baseline's precision/recall/F1
-    were verified against the full 27,128-row dataset (it's untrained, no
-    train/test split applies). The ML models' metrics are computed only on
-    the 8,139-row held-out test split. The comparison is directionally
-    sound but not strictly like-for-like — should be stated as such in any
-    interview framing.
+1–19. Unchanged from Milestone 8 — see prior version of this file / git
+history for full text.
+20. **The champion/challenger comparison branch in
+    `validate_and_promote_model.py` is implemented but not yet exercised
+    against live output** — only the "no existing champion" path has run.
+    Requires a second model version to verify (e.g. a deliberate retrain).
+    Not a defect; a stated verification gap per ADR-015.
+21. **The `archived` alias only tags the single most-recently-losing
+    version** — earlier losing versions remain in the registry (immutable,
+    queryable by version number) but lose the alias tag once a newer
+    version is archived. Full loss history is not queryable via alias
+    alone. Deliberately left as-is; a naming convention for per-version
+    archival tags would resolve this if ever needed.
 
 ---
 
@@ -244,9 +222,9 @@ single-event-level anomaly injection, `amount = 0.0` sentinel ambiguity,
 | Unity Catalog schemas | `ced.bronze`, `ced.silver`, `ced.gold`, `ced.training`, `ced.models` | ✅ Verified |
 | Unity Catalog volumes | `ced.bronze.raw_uploads`, `ced.gold.exports`, `ced.training.raw_labels` | ✅ Verified |
 | MLflow tracking | Databricks-managed workspace experiment, `/Shared/customer_event_detection_m8` | ✅ Verified |
-| Unity Catalog model registry | `ced.models.logistic_regression_detector` v1, `ced.models.xgboost_detector` v1 | ✅ Verified |
+| Unity Catalog model registry | `ced.models.logistic_regression_detector` v1 (alias `champion`), `ced.models.xgboost_detector` v1 (no alias) | ✅ Verified |
 
-## Repository Structure (as of Milestone 8)
+## Repository Structure (as of Milestone 9)
 ```text
 customer-event-detection/
 ├── README.md
@@ -266,7 +244,8 @@ customer-event-detection/
 │ │ ├── ADR-011-silver-data-quality-strategy.md
 │ │ ├── ADR-012-gold-feature-engineering-strategy.md
 │ │ ├── ADR-013-baseline-detector-design.md
-│ │ └── ADR-014-ml-model-training-strategy.md
+│ │ ├── ADR-014-ml-model-training-strategy.md
+│ │ └── ADR-015-model-validation-and-promotion.md
 │ ├── security/ (empty)
 │ ├── governance/ (empty)
 │ ├── mlops/ (empty)
@@ -286,7 +265,8 @@ customer-event-detection/
 │ ├── gold_feature_engineering.py
 │ ├── baseline_detector.py
 │ ├── load_ground_truth.py
-│ └── train_model.py
+│ ├── train_model.py
+│ └── validate_and_promote_model.py
 ├── evaluation/
 │ └── evaluate_baseline.py
 ├── data_quality/ (empty)
@@ -330,15 +310,20 @@ customer-event-detection/
 - `pytest>=8.3.0`
 - `ruff>=0.6.0`
 
+No new dependencies introduced in Milestone 9 — `validate_and_promote_model.py`
+uses only `mlflow.tracking.MlflowClient`, already available in the
+Databricks-managed MLflow runtime.
+
 ## Databricks Status
 - Edition: Free Edition, serverless compute only
 - Catalog: `ced`; Schemas: `bronze`, `silver`, `gold`, `training`, `models`
-- Bronze/Silver/Gold tables: unchanged from Milestone 7
-- `ced.training.ground_truth_labels` (27,128 rows, new in Milestone 8)
-- `ced.models.logistic_regression_detector` v1, `ced.models.xgboost_detector`
-  v1 (new in Milestone 8, Unity Catalog model registry)
-- MLflow experiment `/Shared/customer_event_detection_m8`: 3 runs
-  (`baseline_rule_v1_reference`, `logistic_regression`, `xgboost`)
+- Bronze/Silver/Gold/training tables: unchanged from Milestone 8
+- `ced.models.logistic_regression_detector` v1 — alias `champion` (new in
+  Milestone 9)
+- `ced.models.xgboost_detector` v1 — no alias (deliberately outside M9's
+  gate)
+- MLflow experiment `/Shared/customer_event_detection_m8`: unchanged, 3
+  runs (Milestone 9 reads from it, does not add runs)
 - Notebook execution: manual (Run All), not yet orchestrated
 
 ## Airflow Status
@@ -349,90 +334,26 @@ customer-event-detection/
 - Framework: `pytest`
 - Current coverage: environment (2), customer generator (7), event
   generator (19), upload-to-volume (3), upload-ground-truth (3) —
-  **34 total**
+  **34 total**, unchanged in Milestone 9
 - No automated coverage for any Databricks/Spark-only notebook, consistent
-  with the project's stated no-local-PySpark-harness reasoning.
+  with the project's stated no-local-PySpark-harness reasoning —
+  `validate_and_promote_model.py` follows this same pattern.
 
 ## Linting/Formatting Setup
-- Tool: `ruff` (single tool for both)
-- New in Milestone 8: `pyproject.toml` gained a scoped
-  `[tool.ruff.lint.per-file-ignores]` entry, `"notebooks/*.py" = ["E402"]`
-  — required by Databricks' `%pip install` → restart → import pattern,
-  first triggered by `train_model.py`'s `xgboost` install. `F821` is not
-  ignored anywhere; it continues to be resolved via explicit
-  `from databricks.sdk.runtime import ...` imports, per the project's
-  established convention.
-- Verified commands: `uv run ruff check .`, `uv run ruff format --check .` —
-  both clean as of Milestone 8 changes.
+- Unchanged from Milestone 8. No new lint/format exceptions required in
+  Milestone 9 — `validate_and_promote_model.py` needed no `%pip install`,
+  so the `E402` per-file-ignore situation does not recur here.
 
 ## CI/CD Status
 - GitHub Actions workflow `ci.yml`: lint → format check → test, on push/PR to `main`
-- ✅ Confirmed green on `main` through Milestone 8
+- ✅ Confirmed green on `main` through Milestone 8; Milestone 9 introduces
+  no new testable Python module (Databricks notebook only), so no CI
+  changes expected — to be confirmed once committed.
 - Still does not build/run Docker, Airflow, or touch Databricks (by design)
 
-## Commands Used to Verify Milestone 8
-```powershell
-uv run ruff check .
-uv run ruff format --check .
-uv run pytest tests/test_upload_ground_truth.py -v
-uv run python training/upload_ground_truth.py
-```
-(Databricks notebooks — `load_ground_truth.py` then `train_model.py` — run
-manually via "Run All" in the Databricks workspace.)
+## Commands Used to Verify Milestone 9
+(Databricks notebook — `validate_and_promote_model.py` — run manually via
+"Run All" in the Databricks workspace; no local commands required for this
+milestone.)
 
-Observed output (`notebooks/load_ground_truth.py`):
-```
-Loaded 27128 ground-truth label rows from volume.
-+-----------------+-----+
-|anomaly_type     |count|
-+-----------------+-----+
-|NULL             |26586|
-|amount_spike     |57   |
-|channel_deviation|128  |
-|geo_deviation    |128  |
-|new_device       |229  |
-+-----------------+-----+
-
-Wrote 27128 rows to ced.training.ground_truth_labels
-
-+----------+-----+
-|is_anomaly|count|
-+----------+-----+
-|      true|  542|
-|     false|26586|
-+----------+-----+
-```
-
-Observed output (`notebooks/train_model.py`):
-```
-Gold rows: 27128, joined rows: 27128
-Collected 27128 rows to driver for training.
-Positive class (is_anomaly=True) count: 542
-
-Train: 18989, Test: 8139
-Train strata: normal 18610, new_device 160, geo_deviation 90,
-              channel_deviation 89, amount_spike 40
-Test strata:  normal 7976, new_device 69, channel_deviation 39,
-              geo_deviation 38, amount_spike 17
-
-Logged baseline reference run.
-
-Created version '1' of model 'ced.models.logistic_regression_detector'
-LogisticRegression — precision 0.9879, recall 1.0000, f1 0.9939
-{'new_device': 1.0, 'geo_deviation': 1.0, 'amount_spike': 1.0, 'channel_deviation': 1.0}
-
-Created version '1' of model 'ced.models.xgboost_detector'
-XGBoost — precision 0.9581, recall 0.9816, f1 0.9697
-{'new_device': 1.0, 'geo_deviation': 1.0, 'amount_spike': 0.8235294117647058, 'channel_deviation': 1.0}
-```
-
----
-
-## Next Recommended Task
-**Milestone 9: model validation and promotion** — build the mechanism this
-milestone deliberately deferred: a defined gate (e.g. minimum recall on
-`channel_deviation`, no precision regression below some floor vs. the
-baseline) that a registered model must pass before being promoted to a
-production alias, with LogisticRegression v1 as the first real candidate to
-run through it. Not started — do not begin without explicit user
-confirmation.
+Observed output (`notebooks/validate_and_promote_model.py`):
