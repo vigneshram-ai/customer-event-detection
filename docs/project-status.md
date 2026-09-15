@@ -1,21 +1,19 @@
 # Project Status — Customer Event Detection ML Solution
 
-_Last updated: End of Milestone 12_
+_Last updated: End of Milestone 13_
 
-_Milestone 12 status: IMPLEMENTED AND VERIFIED — real Airflow orchestration
-replaces the temporary smoke-test DAG. Two independently-triggered DAGs:
-`ced_inference_pipeline` (Bronze→Silver→Gold→batch inference→monitoring) and
-`ced_training_pipeline` (train→validate/promote), connected only through the
-Unity Catalog model registry `champion` alias, not through Airflow
-dependencies. Both DAGs run via `DatabricksSubmitRunOperator` using the
-multi-task `tasks=[...]` shape, required for Databricks Free Edition
-serverless compute — `DatabricksNotebookOperator` does not support
-serverless in the installed provider version. Both DAGs ran end-to-end
-successfully with verified (not just "ran without error") output. See
-ADR-002 and ADR-018 for full design detail, including a documented
-environment change: Airflow now runs natively inside WSL2 Ubuntu, not
-Docker Compose, reversing the "Windows native, no WSL2" principle stated
-since Milestone 1._
+_Milestone 13 status: IMPLEMENTED AND VERIFIED — security and secrets
+management investigated empirically against the live Databricks Free
+Edition workspace (not assumed from general documentation). Three areas
+probed: Databricks secret scopes, Unity Catalog RBAC, and audit logging.
+All three were found to be genuinely functional on Free Edition — notably
+better than the assumptions carried since Milestone 1, most significantly
+that `ced.training` schema isolation via a dedicated identity was believed
+unenforceable on a "single-user" Free Edition and has now been proven
+enforceable. No pipeline code changed this milestone — this was a
+verification-and-documentation milestone, consistent with the project's
+"verify before building" discipline. See ADR-007 for full detail. CI/CD
+extension is deliberately deferred to Milestone 14._
 
 ## Status Legend
 - ✅ IMPLEMENTED & VERIFIED — built, run, and confirmed working by the user with observed output
@@ -29,132 +27,105 @@ since Milestone 1._
 
 ### ✅ Implemented & Verified
 
-**Milestones 1–11** — unchanged from prior status; see git history / earlier
+**Milestones 1–12** — unchanged from prior status; see git history / earlier
 versions of this file for full detail.
 
-**Milestone 12 — Real Airflow orchestration**
-- **Environment change, documented not silently patched**: the Milestone 1
-  Docker Compose Airflow setup could not run on this laptop (Docker Desktop's
-  own overhead exhausted resources before Airflow's containers were even
-  healthy). Airflow does not support native Windows Python installation
-  either (a hard platform check, not a config issue). Resolution: Airflow
-  3.3.1 now runs natively inside a dedicated WSL2 Ubuntu distro (Python 3.12
-  venv, `airflow standalone`, SQLite metadata DB, `SequentialExecutor`),
-  `dags_folder` pointed at the Windows-mounted project path. This reverses
-  the "Windows native, no WSL2 terminal use" principle stated since
-  Milestone 1 — see ADR-018.
-- **`apache-airflow-providers-databricks` 7.18.1** installed into the WSL2
-  Airflow venv (not the project's `uv` environment — no `pyproject.toml`
-  change). `databricks_default` connection configured via the Airflow UI
-  using the existing workspace PAT.
-- **Serverless compute compatibility — empirically resolved, not assumed**:
-  `DatabricksNotebookOperator` requires a cluster reference (confirmed via
-  a 400 API error) and does not support Free Edition serverless in the
-  installed provider version (a brief upstream serverless-support PR was
-  reverted before this version). The legacy `DatabricksSubmitRunOperator`
-  single-task shorthand (`notebook_task=`) also fails, for the same reason.
-  **Working pattern**: `DatabricksSubmitRunOperator` with the multi-task
-  `tasks=[...]` array (task-spec dicts, no cluster field), confirmed via a
-  minimal single-task test DAG before building the full pipelines. See
-  ADR-018 for full detail.
-- **`ced_inference_pipeline`** (`airflow/dags/ced_inference_pipeline.py`) —
-  5 tasks, linear dependency chain: `bronze_ingestion >>
-  silver_transformation >> gold_feature_engineering >> batch_inference >>
-  monitoring`. `schedule=None` (manual trigger only — WSL2 Airflow has no
-  persistent scheduler surviving a laptop restart, so a cron schedule would
-  silently never fire). `retries=1`, `retry_delay=2min` per task. Each task
-  is its own `DatabricksSubmitRunOperator` (not bundled into one multi-task
-  call) for independent retry/failure visibility per stage.
-  - **Full run verified**: all five tasks succeeded. Fresh timestamps
-    confirmed in `ced.bronze`, `ced.gold.customer_events_features`, and
-    `ced.inference.detection_results`. `ced.monitoring.batch_quality_report`
-    grew from 158 to 237 rows (+79, matching exactly one clean monitoring
-    run with a new `run_id` — no double-write). Silver `_rejects` tables
-    confirmed at 0.
-- **`ced_training_pipeline`** (`airflow/dags/ced_training_pipeline.py`) —
-  2 tasks: `train_model >> validate_and_promote_model`. Deliberately **not**
-  chained to `ced_inference_pipeline` — connected only via the Unity Catalog
-  `champion` alias, which `ced_inference_pipeline` always reads at run time.
-  `schedule=None` (manual trigger only, same reasoning as above). Assumes
-  Gold is already current; does not re-run Bronze/Silver/Gold itself.
-  - **Full run verified — and the first live execution of the
-    champion/challenger comparison branch** (previously Technical Debt #20,
-    unverified since Milestone 9): v2 trained, passed all three validation
-    gate thresholds (`recall_channel_deviation` 1.0, `recall` 1.0,
-    `precision` 0.9879), tagged `challenger`. F1 comparison against
-    champion v1 was an exact tie (0.9939 vs. 0.9939) — the documented
-    tie-break rule ("ties favor the incumbent champion," ADR-015) correctly
-    held v1 as `champion`, tagged v2 `archived`. **Technical Debt #20 is
-    resolved**: the comparison logic is confirmed correct under a real tie,
-    not just confirmed to execute.
-- **Baseline detector (`baseline_detector.py`) deliberately excluded** from
-  both DAGs — it's a one-time analytical comparison (Milestone 7), not part
-  of the production inference path.
-- **Temporary test/smoke DAGs retired**: `00_environment_smoke_test.py`
-  (served its Milestone 1 purpose) and `99_databricks_serverless_test.py`
-  (its verification purpose is now fully captured in ADR-018) both deleted
-  after the real DAGs were verified working.
-- **New ADRs**: ADR-002 ("Airflow as the Orchestration Layer" — pending
-  since Milestone 1, now formally written with real content) and ADR-018
-  ("Milestone 12 — Real Orchestration": two-DAG split rationale, WSL2
-  environment change, serverless compute compatibility finding).
-- **CI confirmed green** — no `pyproject.toml` changes, no new local
-  dependencies (Databricks provider lives only in the WSL2 Airflow venv).
+**Milestone 13 — Security and secrets management (empirical verification)**
+
+- **Databricks CLI installed and authenticated** — winget install
+  (`Databricks.DatabricksCLI` 1.16.1), not on system PATH by default
+  (fixed via a permanent User PATH entry). Authenticated via
+  `configure --token`. In the process, discovered the project's PAT had
+  silently expired (`auth profiles` reported `Valid: NO`) — a real,
+  previously-undetected credential lifecycle gap. New PAT generated;
+  `.env` and Airflow's `databricks_default` connection both updated.
+- **Databricks secret scopes — verified functional.** Created scope
+  `ced-secrets`; wrote and read a test secret end-to-end via
+  `dbutils.secrets.get()` from a notebook; confirmed automatic redaction
+  of secret values in cell output (`print()` shows `[REDACTED]`, `len()`
+  still returns the true value length). **Decision: the project's PAT is
+  NOT migrated to a secret scope** — `dbutils.secrets.get()` is only
+  reachable from inside the Databricks runtime, but the PAT's job is to
+  let *external* processes (local scripts, Airflow) authenticate *to*
+  Databricks in the first place. This is a genuine bootstrap-circularity
+  constraint, not an unexplored option. Full reasoning in ADR-007.
+- **Unity Catalog RBAC — verified functional, overturning a prior
+  assumption.** `GRANT`/`REVOKE`/`SHOW GRANTS` confirmed working with
+  correct principal validation. A service principal was created via the
+  workspace UI (Application Id issued, OAuth client secret generated),
+  granted a scoped chain (`USE CATALOG` on `ced`, `USE SCHEMA` +
+  `SELECT` on `ced.training`), and successfully authenticated
+  independently via OAuth client credentials to read `ced.training` —
+  while being correctly denied access to `ced.bronze`, a schema it had
+  no grant on. This is full positive- and negative-verified hierarchical
+  enforcement using a real non-human identity.
+- **Audit logging — verified functional.** `system.access.audit` exists,
+  is populated by default (no explicit enablement step needed, contrary
+  to what general documentation implies for some system tables), and
+  captured this milestone's own RBAC probe activity with correct
+  identity attribution, full request parameters, and response status.
+- **New ADR-007** — "Security and Secrets Management": full findings,
+  decisions, and rationale for all three areas above.
+- **No runtime/pipeline code changed.** This was a verification and
+  documentation milestone. Notebooks, DAGs, and the training pipeline
+  continue to run exactly as they did at the close of Milestone 12.
 
 ### 🟡 Implemented, Not Fully Verified
-- None currently — Milestone 12 resolved the prior open item (champion/
-  challenger comparison branch, Technical Debt #20).
+- Airflow Fernet key confirmed present (non-default) via a config check;
+  full implications not deeply explored this milestone (deliberately kept
+  light-touch per user direction).
 - **`batch_inference.py`'s exact resolved `model_version` string** —
   inferred, not directly observed (Technical Debt #26). Unaffected by
-  Milestone 12.
+  Milestone 13.
 
 ### 📐 Designed Only
-- Full "Airflow vs. alternatives" rationale — **now written**, see ADR-002
-  (moved out of this section).
-- Time-of-day deviation feature.
-- `ced.training` schema access restricted to a training-job identity — cannot be
-  enforced on Free Edition (single-user).
-- Live/shadow evaluation for the champion/challenger pattern.
-- A genuinely new/unseen event batch for inference — still the same sample-
-  based batch from Milestone 10; Milestone 12's orchestration runs the same
-  notebook, doesn't change its data source.
-- Distributed (`spark_udf`-based) batch scoring and a custom `PythonModel`-based
-  flavor-agnostic probability output.
-- A real (cron-based) Airflow schedule — deliberately deferred; the current
-  WSL2-native Airflow instance has no persistent scheduler surviving a
-  laptop shutdown, so a configured schedule would be non-functional in
-  practice. Both DAGs use `schedule=None` (manual trigger) as an explicit,
-  reasoned decision, not a placeholder — see ADR-002/ADR-018.
-- Deterministic `run_id` generation for monitoring (to make retries
-  idempotent) — flagged as a real gap in ADR-018, not yet implemented since
-  both DAGs are manually triggered and the practical risk is currently low.
-- Evidently Test Suites wired to actual pipeline gating (e.g., failing a
-  DAG task on `DriftedColumnsCount` share exceeding a threshold) — still
-  not implemented; Milestone 12 provides the orchestration substrate this
-  would need, but gating itself remains a documented future extension.
-- PySpark-native (distributed) drift/quality computation for larger-than-driver-
-  memory datasets — unchanged, still a documented scaling consideration only.
+- **Training-pipeline identity migration to the verified service
+  principal** — the SP (`test_sp`, Application Id
+  `374365a1-96f6-4597-af4c-a82aec75fff6`) is real, correctly scoped, and
+  proven functional, but `train_model.py` /
+  `validate_and_promote_model.py` still run under the personal account.
+  Migrating them is now a well-understood, low-effort future item, not
+  an open unknown.
+- Replacing the personal PAT with SP OAuth client credentials for
+  Airflow's `databricks_default` connection and local scripts — a
+  distinct decision from the secret-scope question, not undertaken this
+  milestone.
+- A scheduled query or dashboard against `system.access.audit` as an
+  actual monitoring artifact — the table is verified and populated but
+  nothing consumes it yet.
+- Time-of-day deviation feature (unchanged, carried from earlier
+  milestones).
+- Live/shadow evaluation for the champion/challenger pattern (unchanged).
+- A genuinely new/unseen event batch for inference (unchanged).
+- Full CI/CD extension beyond lint/format/test — deliberately deferred to
+  Milestone 14.
 
 ### ⏳ Future
-- Verifying batch inference's exact `model_version` output string directly
-  (Technical Debt #26).
+- Verifying batch inference's exact `model_version` output string
+  directly (Technical Debt #26).
 - A genuinely new event batch for batch inference.
 - Append/dedup strategy for `ced.inference.detection_results` (Technical
-  Debt #24) — orchestration doesn't resolve this; still `overwrite` mode.
-- Re-running monitoring against a genuinely new (non-overlapping) batch,
-  once one exists, to get a real drift comparison rather than a negative
-  control.
-- Milestone 13 onward per the approved roadmap: security, full CI/CD
-  extension, and remaining milestones.
+  Debt #24).
+- Re-running monitoring against a genuinely new (non-overlapping) batch.
+- PAT lifecycle management — no expiry alerting or rotation process
+  exists; this milestone's expired-PAT discovery was accidental, not
+  detected by any monitoring. A real gap worth addressing before any
+  future milestone depends on unattended/scheduled execution.
+- Cleanup decision on `test_sp` — rename and formally adopt as the
+  training-job identity, or delete it. Currently left in place,
+  harmless but unused in production paths.
+- Milestone 14 (CI/CD extension) and remaining milestones per the
+  approved roadmap.
 
 ---
 
 ## Current Work
-None in progress. Milestone 12 is closed.
+None in progress. Milestone 13 is closed.
 
 ## Pending Work
-Milestones 13–23 per the approved roadmap. Next milestone not yet scoped in
-detail — do not begin without explicit user confirmation.
+Milestone 14 (CI/CD extension) next, per user direction this milestone.
+Milestones 15–23 per the approved roadmap, not yet scoped in detail — do
+not begin without explicit user confirmation.
 
 ---
 
@@ -171,54 +142,59 @@ detail — do not begin without explicit user confirmation.
 | Ground truth isolated to `ced.training`, in-memory-only join to features | **ADR-014** |
 | Model validation gate: three thresholds, no recomputation; alias-based promotion | **ADR-015** |
 | Batch inference scores a reproducible sample of existing Gold data; generic `pyfunc.load_model` + sklearn unwrap for `predict_proba`; `fillna(0)` train/serve parity (scoring matrix only — see ADR-017 correction) | **ADR-016** |
-| Monitoring uses Evidently directly (no hand-rolled statistics); auto-selected drift tests (not forced PSI); Milestone 10's batch treated as current-under-monitoring with explicit negative-control framing; reference/current imputation parity applied independently of the (corrected) upstream gap; extraction verified against Evidently's real `report.dict()` schema | **ADR-017** |
-| Airflow selected as orchestration layer over no-orchestrator and Databricks Workflows alternatives | **ADR-002** (new, Milestone 12) |
-| Two-DAG split (inference vs. training), decoupled via the `champion` alias not Airflow dependencies; WSL2-native execution environment (reversing "Windows native, no WSL2"); `DatabricksSubmitRunOperator` + multi-task `tasks=[...]` shape required for Free Edition serverless compute | **ADR-018** (new, Milestone 12) |
+| Monitoring uses Evidently directly (no hand-rolled statistics); auto-selected drift tests (not forced PSI); Milestone 10's batch treated as current-under-monitoring with explicit negative-control framing | **ADR-017** |
+| Airflow selected as orchestration layer over no-orchestrator and Databricks Workflows alternatives | **ADR-002** |
+| Two-DAG split (inference vs. training), decoupled via the `champion` alias; WSL2-native execution environment; `DatabricksSubmitRunOperator` + multi-task `tasks=[...]` shape required for Free Edition serverless compute | **ADR-018** |
+| PAT remains in `.env`/Airflow connection store rather than a Databricks secret scope, due to a bootstrap-circularity constraint; Unity Catalog RBAC (including service-principal identity) empirically confirmed functional on Free Edition, overturning the prior single-user assumption; `system.access.audit` confirmed populated and usable | **ADR-007** (new, Milestone 13) |
 | `uv` over Poetry/pip; `ruff` for lint + format | Recorded here only |
 
 ---
 
 ## Known Issues
-- None blocking. CI confirmed green through Milestone 12.
-- `ced.inference.detection_results`'s persisted feature columns are raw, not
-  imputed — see Technical Debt #28. Does not affect `detection_score`/
-  `detection_flag`, which are correct. Unaffected by Milestone 12.
-- Monitoring's `run_id` is a fresh UUID per run, not derived deterministically
-  from Airflow's run context — a retried task after partial failure could in
-  principle double-write a batch. Low practical risk currently (manual
-  trigger only); see ADR-018 Future Considerations.
+- None blocking. CI confirmed green through Milestone 12; unaffected by
+  Milestone 13 (no code changes).
+- `ced.inference.detection_results`'s persisted feature columns are raw,
+  not imputed — Technical Debt #28. Unaffected by Milestone 13.
+- Monitoring's `run_id` is a fresh UUID per run — Technical Debt #29.
+  Unaffected by Milestone 13.
+- **NEW — PAT lifecycle has no monitoring.** The project's original PAT
+  silently expired and was discovered only by chance during this
+  milestone's CLI-auth setup. No alerting exists for this. Low practical
+  risk currently (manual-trigger-only pipelines, frequent hands-on
+  development), but a real gap if any future milestone introduces
+  scheduled/unattended execution. See ADR-007 Future Considerations.
+- **NEW — a throwaway service principal (`test_sp`) exists in the
+  workspace** with real, narrow grants (`USE CATALOG` on `ced`,
+  `USE SCHEMA` + `SELECT` on `ced.training`). Harmless as configured, not
+  referenced by any pipeline, but should be formally adopted or deleted
+  as a cleanup item.
 
 ## Technical Debt
-1–19. Unchanged from Milestone 8 — see prior version of this file / git history.
+1–19. Unchanged from Milestone 8 — see prior version of this file / git
+history.
 
-~~20. Champion/challenger comparison branch unverified against live output.~~
-**RESOLVED at Milestone 12** — verified via `ced_training_pipeline`'s first
-real run: v2 passed the gate, tied champion v1 on F1, tie-break rule
-correctly held v1 as champion. See ADR-018.
+~~20. Champion/challenger comparison branch unverified against live
+output.~~ **RESOLVED at Milestone 12.**
 
-21. `archived` alias only tags the single most-recently-losing version.
-22. Milestone 10's batch inference scores a reproducible sample of existing Gold
-    data, not genuinely new/unseen events. Still the reason Milestone 11's
-    near-zero-drift result must be read as a negative control — unaffected
-    by Milestone 12's orchestration (same underlying notebook, same data
-    source).
-23. `predict_proba` obtained via sklearn-specific unwrap, not flavor-agnostic.
-24. `ced.inference.detection_results` uses `mode("overwrite")`, no historical
-    accumulation. Not addressed by adding orchestration.
-25. `fillna(0)` on amount-based Gold features collapses two distinct NULL causes.
-26. Milestone 10's exact `model_version` output string was inferred, not
-    directly observed.
-27. Monitoring's Evidently-output extraction (`flatten_evidently_report`)
-    depends on Evidently's internal `report.dict()` schema, not a documented
-    stable public contract.
-28. `ced.inference.detection_results`'s persisted `FEATURE_COLUMNS` are
-    raw (non-imputed) Gold values, not the values actually fed to the model.
-    See Milestone 11 detail above (unchanged this milestone).
-29. **NEW — Monitoring's `run_id` is a fresh UUID per run**, not derived
-    deterministically from the Airflow run context. A task-level retry after
-    a partial failure (write succeeds, task errors before confirming) could
-    double-write a batch under a new `run_id`. Low risk currently since both
-    DAGs are manually triggered, not scheduled. See ADR-018.
+21–29. Unchanged from Milestone 12 — see prior version of this file.
+None resolved or newly introduced by Milestone 13 (this milestone
+concerned platform capability verification, not pipeline code).
+
+---
+
+## Corrections to Prior Documentation
+
+Milestone 13 overturned an assumption stated since Milestone 1 and
+repeated in every snapshot through Milestone 12:
+
+> ~~`ced.training` schema access restricted to a training-job identity —
+> cannot be enforced on Free Edition (single-user).~~
+
+This was **empirically tested and found incorrect**. Free Edition supports
+multiple identities (human and service-principal), full `GRANT`/`REVOKE`
+semantics, and correctly hierarchical enforcement. The isolation is now
+**📐 DESIGNED AND PROVEN FEASIBLE, NOT YET IMPLEMENTED** — a materially
+different and more accurate status than "cannot be enforced." See ADR-007.
 
 ---
 
@@ -226,22 +202,23 @@ correctly held v1 as champion. See ADR-018.
 
 | Item | Value | Verification status |
 |---|---|---|
-| OS | Windows, with WSL2 Ubuntu used for Airflow only (reversing the prior "no WSL2 terminal use" principle — see ADR-018) | ✅ Verified |
-| Project Python (via `uv`) | 3.11.16 | ✅ Verified (unchanged, project code remains Windows-native) |
+| OS | Windows, with WSL2 Ubuntu used for Airflow only | ✅ Verified |
+| Project Python (via `uv`) | 3.11.16 | ✅ Verified (unchanged) |
 | Airflow Python (WSL2 venv) | 3.12.13 | ✅ Verified |
+| Airflow Fernet key | Present, non-default | ✅ Verified (Milestone 13, light-touch check only) |
 | `uv` version | 0.12.5 | Stated by user |
-| Docker Desktop | No longer used for Airflow (resource constraints on this laptop); still used as WSL2's own backend distro (`docker-desktop`), separate from the `Ubuntu` distro running Airflow | ✅ Verified (environment change, Milestone 12) |
-| Airflow | 3.3.1, native in WSL2 Ubuntu, `airflow standalone` (SQLite, `SequentialExecutor`), manually started per session | ✅ Verified |
-| `apache-airflow-providers-databricks` | 7.18.1 | ✅ Verified |
+| Databricks CLI | 1.16.1, installed via `winget`, added to User PATH | ✅ Verified (Milestone 13) |
+| Databricks CLI auth profile | `DEFAULT`, token-based, `Valid: YES` (after PAT rotation) | ✅ Verified (Milestone 13) |
 | Git | `main` branch, GitHub remote connected, 2.55.0.windows.4 | ✅ Verified |
 | Databricks workspace | Free Edition, `https://dbc-01205ae9-f87b.cloud.databricks.com/`, serverless compute only | ✅ Verified |
 | Unity Catalog catalog | `ced` | ✅ Verified |
 | Unity Catalog schemas | `ced.bronze`, `ced.silver`, `ced.gold`, `ced.training`, `ced.models`, `ced.inference`, `ced.monitoring` | ✅ Verified |
-| Unity Catalog model registry | `ced.models.logistic_regression_detector`: v1 → `champion`, v2 → `archived` (Milestone 12 champion/challenger tie, v1 held); `ced.models.xgboost_detector` v1 (no alias) | ✅ Verified |
-| `ced.inference.detection_results` | 500 rows, feature columns raw not imputed (Technical Debt #28); fresh timestamps confirmed post-Milestone-12 run | ✅ Verified (with caveat) |
-| `ced.monitoring.batch_quality_report` | 237 rows (2 pre-M12 runs × 79 + 1 orchestrated run × 79) | ✅ Verified |
+| Databricks secret scope | `ced-secrets` — created, write/read verified, notebook redaction confirmed | ✅ Verified (Milestone 13) |
+| Service principal | `test_sp`, Application Id `374365a1-96f6-4597-af4c-a82aec75fff6`, OAuth client credentials generated, scoped grants on `ced` (`USE CATALOG`) and `ced.training` (`USE SCHEMA`, `SELECT`) | ✅ Verified (Milestone 13) — not adopted into any pipeline yet |
+| `system.access.audit` | Populated, regional, 365-day retention (per Databricks documentation) | ✅ Verified (Milestone 13) |
+| Unity Catalog model registry | `ced.models.logistic_regression_detector`: v1 → `champion`, v2 → `archived`; `ced.models.xgboost_detector` v1 (no alias) | ✅ Verified (unchanged) |
 
-## Repository Structure (as of Milestone 12)
+## Repository Structure (as of Milestone 13)
 ```text
 customer-event-detection/
 ├── README.md
@@ -250,16 +227,17 @@ customer-event-detection/
 ├── .python-version
 ├── .gitignore (includes .env)
 ├── .gitattributes
-├── .env (gitignored, not in repo)
+├── .env (gitignored, not in repo; PAT rotated this milestone)
 ├── docs/
 │ ├── project-status.md
 │ ├── current-context.md
 │ ├── architecture/ (empty)
 │ ├── adr/
-│ │ ├── ADR-002-airflow-orchestration-layer.md (new, Milestone 12)
+│ │ ├── ADR-002-airflow-orchestration-layer.md
+│ │ ├── ADR-007-security-secrets-management.md (new, Milestone 13)
 │ │ ├── ADR-009 … ADR-017 (unchanged)
-│ │ └── ADR-018-milestone-12-orchestration.md (new, Milestone 12)
-│ ├── security/ (empty)
+│ │ └── ADR-018-milestone-12-orchestration.md
+│ ├── security/ (empty — consider moving ADR-007 detail here in future)
 │ ├── governance/ (empty)
 │ ├── mlops/ (empty)
 │ └── nfr/ (empty)
@@ -284,107 +262,119 @@ customer-event-detection/
 ├── data/ (gitignored)
 ├── airflow/
 │ └── dags/
-│   ├── ced_inference_pipeline.py (new, Milestone 12)
-│   └── ced_training_pipeline.py (new, Milestone 12)
+│   ├── ced_inference_pipeline.py
+│   └── ced_training_pipeline.py
 ├── tests/
 ├── docker/ (empty — Docker no longer used for Airflow, see ADR-018)
 └── .github/workflows/ci.yml
 ```
 
-Note: `00_environment_smoke_test.py` and `99_databricks_serverless_test.py`
-have been deleted — both served their purpose and are fully documented in
-ADR-018 if ever needed for reference.
+No files added to the repo this milestone besides `docs/adr/ADR-007-*.md`
+and the updated status/context documents. No `pyproject.toml` change — the
+Databricks CLI is a standalone binary (winget-installed), not a Python
+dependency of any kind, and is not tracked in the project's dependency
+files.
 
 ## Installed Dependencies
 
 **Production**: `databricks-sdk>=0.133.0`, `python-dotenv>=1.2.3`, `pandas`.
-Databricks-side only (not `pyproject.toml` dependencies): `xgboost`, `mlflow`,
-`evidently`.
+Databricks-side only: `xgboost`, `mlflow`, `evidently`.
 
 **Dev**: `pytest>=8.3.0`, `ruff>=0.6.0`.
 
-**Airflow (WSL2 venv only, not `pyproject.toml`)**: `apache-airflow==3.3.1`,
+**Airflow (WSL2 venv only)**: `apache-airflow==3.3.1`,
 `apache-airflow-providers-databricks==7.18.1`.
 
-No new local (`uv`-managed) dependencies introduced in Milestone 12.
+**Local tooling (not a project dependency)**: Databricks CLI 1.16.1,
+installed via `winget install Databricks.DatabricksCLI`, standalone binary,
+added to User PATH. Not referenced in `pyproject.toml` — this is
+operator/dev tooling, the same category as Git, not a runtime dependency.
+
+No new local (`uv`-managed) dependencies introduced in Milestone 13.
 
 ## Databricks Status
 - Catalog: `ced`; Schemas: `bronze`, `silver`, `gold`, `training`, `models`,
   `inference`, `monitoring`
-- `ced.monitoring.batch_quality_report` — 237 rows total (79 added by the
-  Milestone 12 orchestrated run)
-- Model registry: `logistic_regression_detector` v1 remains `champion`; v2
-  (trained via `ced_training_pipeline`) tagged `archived` after tying v1 on
-  F1 and losing the incumbent tie-break
-- Notebook execution: now orchestrated via Airflow for both DAGs; manual
-  "Run All" remains available for ad hoc/debugging use
+- Model registry: unchanged from Milestone 12 (`logistic_regression_detector`
+  v1 `champion`, v2 `archived`)
+- **New this milestone**: secret scope `ced-secrets` (created, validated,
+  currently unused by any pipeline); service principal `test_sp` (created,
+  scoped, currently unused by any pipeline); `system.access.audit`
+  confirmed populated
+- Notebook execution: unchanged — orchestrated via Airflow for both DAGs,
+  manual "Run All" available for ad hoc/debugging use
 
 ## Airflow Status
-- **3.3.1, running natively in WSL2 Ubuntu** (not Docker Compose — see
-  ADR-018 for the environment change and rationale)
-- `apache-airflow-providers-databricks` 7.18.1 installed; `databricks_default`
-  connection configured
-- `dags_folder` points at the Windows-mounted project path — DAG files are
-  version-controlled in the main repo, no separate copy step
-- Two DAGs: `ced_inference_pipeline` (5 tasks, verified end-to-end) and
-  `ced_training_pipeline` (2 tasks, verified end-to-end, including the
-  champion/challenger tie-break)
-- Both DAGs: `schedule=None` (manual trigger only — no persistent scheduler
-  survives a laptop shutdown on this setup)
-- No longer running: Docker Compose Airflow stack, smoke-test DAG,
-  serverless-test DAG (all retired this milestone)
+Unchanged from Milestone 12. Fernet key confirmed present this milestone
+(light-touch check only, per user direction — no deeper investigation of
+Airflow's own security posture undertaken).
 
 ## Testing Setup
-- Unchanged: 34 tests, no automated coverage for Databricks/Spark-only
-  notebooks or Airflow DAGs (consistent pattern — orchestration logic is
-  tested via live execution against Databricks, not local unit tests).
+- Unchanged: 34 tests. Milestone 13 introduced no new automated tests —
+  this milestone's verification was manual/empirical against a live
+  Databricks workspace (CLI commands, notebook cells, API calls), the same
+  pattern used for Milestone 12's serverless-compute verification.
 
 ## Linting/Formatting Setup
-- No new lint/format exceptions required. DAG files live under `airflow/dags/`,
-  outside the `uv`/`ruff`-managed project scope (Airflow's own Python
-  environment is separate — see WSL2 venv note above).
+- No changes this milestone.
 
 ## CI/CD Status
-- GitHub Actions workflow `ci.yml`: lint → format check → test, on push/PR to
-  `main`.
-- ✅ Confirmed green on `main` through Milestone 12 (per user confirmation).
-- Still does not build/run Docker, Airflow, or touch Databricks (by design).
+- GitHub Actions workflow `ci.yml`: lint → format check → test, on push/PR
+  to `main`.
+- Unaffected by Milestone 13 — confirmed green as of Milestone 12, no code
+  changed since.
+- CI/CD extension (credentials in Actions, Docker build, deployment
+  validation) is explicitly **Milestone 14**, not this milestone.
 
-## Commands Used to Verify Milestone 12
-Airflow standalone startup (WSL2 shell):
+## Commands Used to Verify Milestone 13
+
+Databricks CLI setup:
+```powershell
+winget install Databricks.DatabricksCLI
+# Add install directory to User PATH, open new terminal
+databricks --version
+databricks configure --token
+databricks auth profiles
+```
+
+Secret scope verification:
 ```bash
-cd ~/airflow-standalone
-source venv/bin/activate
-export AIRFLOW_HOME=~/airflow-standalone/airflow_home
-airflow standalone
+databricks secrets create-scope ced-secrets
+databricks secrets list-scopes
+databricks secrets put-secret ced-secrets test-key3 --string-value "hello-world"
+databricks secrets list-secrets ced-secrets
+```
+```python
+from databricks.sdk.runtime import dbutils
+
+value = dbutils.secrets.get(scope="ced-secrets", key="test-key3")
+print(f"Retrieved length: {len(value)}")  # 11
+print(value)  # [REDACTED]
 ```
 
-Both DAGs triggered manually via the Airflow UI (`http://localhost:8080`).
-
-Verification queries run against Databricks to confirm `ced_inference_pipeline`
-did real work (not just "ran without error"): fresh timestamps in
-`ced.bronze`/`ced.gold.customer_events_features`/`ced.inference.detection_results`;
-row count on `ced.monitoring.batch_quality_report` (237, up from 158);
-`_rejects` table counts (0) in Silver.
-
-`ced_training_pipeline` output (condensed, from live task logs):
-```text
-train_model completed successfully.
-validate_and_promote_model completed successfully.
-
-Evaluating ced.models.logistic_regression_detector v2
-  [PASS] recall_channel_deviation: 1.0000 (threshold >= 0.95)
-  [PASS] recall: 1.0000 (threshold >= 0.95)
-  [PASS] precision: 0.9879 (threshold >= 0.9)
-v2 tagged 'challenger' (gate passed).
-Comparing challenger v2 (f1=0.9939) vs. champion v1 (f1=0.9939)
-CHAMPION HOLDS — v1 outperforms or ties v2 on f1.
-v2 tagged 'archived'.
-
-Final registered aliases:
-  archived -> v2
-  champion -> v1
+RBAC verification (SQL, run in a Databricks notebook):
+```sql
+SHOW GRANTS ON SCHEMA ced.training;
+GRANT SELECT ON SCHEMA ced.training TO `some-placeholder-group`;  -- rejected: PRINCIPAL_DOES_NOT_EXIST
+GRANT SELECT ON SCHEMA ced.training TO `vigneshram230693@gmail.com`;  -- succeeded
+GRANT USE CATALOG ON CATALOG ced TO `374365a1-96f6-4597-af4c-a82aec75fff6`;
+GRANT USE SCHEMA ON SCHEMA ced.training TO `374365a1-96f6-4597-af4c-a82aec75fff6`;
+GRANT SELECT ON SCHEMA ced.training TO `374365a1-96f6-4597-af4c-a82aec75fff6`;
+```
+```bash
+# ~/.databrickscfg profile [ced-training-sp] with SP client_id/client_secret
+databricks current-user me --profile ced-training-sp
+databricks api get /api/2.1/unity-catalog/schemas/ced.training --profile ced-training-sp  # 200 OK
+databricks api get /api/2.1/unity-catalog/schemas/ced.bronze --profile ced-training-sp     # correctly denied
+databricks api get /api/2.1/unity-catalog/catalogs/ced --profile ced-training-sp           # 200 OK
 ```
 
-`uv run ruff check .` and `uv run ruff format --check .` run locally to
-confirm lint/format unaffected; CI confirmed green.
+Audit log verification (SQL):
+```sql
+SHOW SCHEMAS IN system;
+SHOW TABLES IN system.access;
+SELECT * FROM system.access.audit LIMIT 5;
+```
+
+`uv run ruff check .` and `uv run ruff format --check .` not re-run this
+milestone — no project code changed.
