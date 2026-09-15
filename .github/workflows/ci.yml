@@ -32,3 +32,62 @@ jobs:
 
       - name: Run tests
         run: uv run pytest -v
+
+  dag-integrity:
+    runs-on: ubuntu-latest
+    # Deliberately isolated from the lint-and-test job: apache-airflow and
+    # apache-airflow-providers-databricks are NOT project dependencies
+    # (ADR-018 — Airflow is WSL2-venv-only tooling, same category as the
+    # Databricks CLI). This job installs them into a throwaway environment
+    # purely to validate the two real DAGs, and never touches pyproject.toml
+    # or uv.lock.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12" # matches the real WSL2 Airflow venv (ADR-018)
+          cache: pip
+
+      - name: Install Airflow + Databricks provider
+        # Pinned to the exact versions running in WSL2. Constraints file
+        # follows Airflow's own recommended install method for reproducible
+        # dependency resolution.
+        run: |
+          pip install "apache-airflow==3.3.1" \
+            --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-3.3.1/constraints-3.12.txt"
+          pip install "apache-airflow-providers-databricks==7.18.1" pytest
+
+      - name: Validate DAGs (DagBag parse + structure check)
+        run: python -m pytest airflow/tests -v
+
+  databricks-smoke-test:
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    # Live-workspace check. Restricted to pushes on main only — never on
+    # pull_request — so PR-triggered runs (including from forks) never get
+    # access to the live-workspace secrets. See ADR-019.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Smoke test against live Databricks workspace (as test_sp)
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_SP_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_SP_CLIENT_SECRET }}
+        run: uv run python scripts/ci_databricks_smoke_test.py
