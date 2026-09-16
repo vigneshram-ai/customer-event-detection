@@ -4,16 +4,34 @@ _Purpose: if a new chat/session starts, read this file first to know exactly whe
 project stands, without re-deriving it from conversation history._
 
 ## Where We Are
-Milestones 1–13 are **complete and verified**. Milestone 13 empirically
-tested security and secrets management against the live Databricks Free
-Edition workspace: secret scopes, Unity Catalog RBAC, and audit logging.
-All three were found genuinely functional — better than assumed. No
-pipeline code changed. Milestone 14 (CI/CD extension) has **not** started.
+Milestones 1–14 are **complete and verified**. Milestone 14 extended CI/CD
+with two new GitHub Actions jobs: `dag-integrity` (parses both Airflow
+DAGs, Airflow installed only inside that job) and `databricks-smoke-test`
+(live, read-only check authenticated as the `test_sp` service principal
+from Milestone 13, restricted to `push` on `main` only). Both verified
+against the real GitHub Actions environment and the real live workspace,
+including a deliberate negative test. No pipeline/notebook code changed.
+Milestone 15 has **not** started and is not yet scoped.
 
 ## What Is Actually True Right Now
 - The repo exists locally and on GitHub (`main` branch).
-- CI is confirmed green on `main` through Milestone 12; unaffected by
-  Milestone 13 since no project code changed this milestone.
+- CI is confirmed green on `main` through Milestone 14 — 3 jobs
+  (`lint-and-test`, `dag-integrity`, `databricks-smoke-test`), all passing.
+- **`test_sp` (created in Milestone 13) now authenticates live from GitHub
+  Actions** via OAuth M2M, using 3 new repo secrets (`DATABRICKS_HOST`,
+  `DATABRICKS_SP_CLIENT_ID`, `DATABRICKS_SP_CLIENT_SECRET`). It has a
+  genuine automated consumer now, though it is still not adopted into the
+  training pipeline itself — that remains separate future work.
+- **`databricks-smoke-test` is deliberately restricted to `push` on
+  `main`, never `pull_request`** — confirmed by observing it absent from a
+  PR's checks entirely. This protects live-workspace secrets from
+  PR-triggered runs (including from forks, since the repo is public).
+- **Local reproduction of the `dag-integrity` job requires explicit
+  `python3.12`** in WSL2 — the distro's bare `python3` resolves to 3.14,
+  which is not what the real Airflow venv (3.12.13) uses. Needed
+  `sudo apt install python3.12-venv` first. Doesn't affect the real
+  Airflow venv or the GitHub Actions runner, only local ad hoc checks.
+- Full detail in `docs/adr/ADR-019-cicd-extension.md`.
 - **Databricks CLI now installed locally** (1.16.1, via `winget`), added to
   User PATH, authenticated against the Free Edition workspace via
   token-based `configure --token`.
@@ -49,6 +67,32 @@ pipeline code changed. Milestone 14 (CI/CD extension) has **not** started.
 - `pyproject.toml` unchanged. The Databricks CLI is a standalone binary,
   not a Python package — not tracked as a project dependency, same
   category as Git.
+
+## Key Design Decisions From Milestone 14 (do not silently revisit — full detail in ADR-019)
+- **Airflow installed only inside the `dag-integrity` CI job's own
+  throwaway environment, never added to `pyproject.toml`.** Consistent
+  with ADR-018's treatment of Airflow as environment-specific tooling
+  (same category as the Databricks CLI). This was a deliberate choice
+  among the options considered, not an oversight.
+- **Live smoke test authenticates as `test_sp`, not the personal PAT.**
+  Considered and rejected using the PAT for this — narrower blast radius
+  matters more than reusing an existing credential, especially since
+  `test_sp` already had exactly the right least-privilege grants sitting
+  unused since Milestone 13.
+- **`databricks-smoke-test` runs on `push` to `main` only, never on
+  `pull_request`.** A public repo can receive PRs from anyone, including
+  forks; live-workspace secrets must never be reachable from a
+  PR-triggered run. Confirmed empirically — the job does not appear at
+  all in a PR's checks.
+- **No deploy automation added.** Considered and explicitly rejected:
+  there is no persistent orchestration target to deploy to (both DAGs
+  remain `schedule=None` per ADR-018), so auto-triggering anything on
+  merge would be automation without a real destination.
+- **No Docker CI stage added.** Nothing in the architecture is
+  containerized yet; adding one to satisfy the word "CD" would be
+  technology without genuine architectural purpose.
+- **This was a CI/testing-depth milestone, not a pipeline-implementation
+  milestone.** No `airflow/dags/*.py` or `notebooks/*.py` files changed.
 
 ## Key Design Decisions From Milestone 13 (do not silently revisit — full detail in ADR-007)
 - **PAT is not migrated to a Databricks secret scope.** This is a
@@ -108,10 +152,17 @@ ADR-011 through ADR-014 for full detail.
 - Windows, with a dedicated WSL2 Ubuntu distro used for Airflow only
 - Project code: `uv` 0.12.5, project Python 3.11.16, unchanged
 - Airflow: 3.3.1, Python 3.12.13 (WSL2 venv), Fernet key present
-  (non-default — confirmed this milestone, not deeply investigated further)
-- **New this milestone**: Databricks CLI 1.16.1 installed locally via
-  `winget`, added to User PATH, authenticated (`DEFAULT` profile,
-  token-based)
+  (non-default, confirmed Milestone 13, not deeply investigated further)
+- **WSL2 note (Milestone 14)**: the distro's bare `python3` resolves to
+  3.14, not 3.12 — `python3.12-venv` (via `apt`) and explicit `python3.12`
+  invocation are needed for any ad hoc local venv work (e.g. reproducing
+  the `dag-integrity` CI job locally). Does not affect the real Airflow
+  venv, which is already correctly on 3.12.13.
+- Databricks CLI 1.16.1 installed locally via `winget`, added to User
+  PATH, authenticated (`DEFAULT` profile, token-based)
+- **New this milestone (14)**: GitHub Actions repo secrets `DATABRICKS_HOST`,
+  `DATABRICKS_SP_CLIENT_ID`, `DATABRICKS_SP_CLIENT_SECRET` — used only by
+  the `databricks-smoke-test` CI job, on `push` to `main` only
 - Git remote connected, Git version 2.55.0.windows.4
 - Databricks Free Edition workspace (serverless compute only):
   `https://dbc-01205ae9-f87b.cloud.databricks.com/`
@@ -119,10 +170,12 @@ ADR-011 through ADR-014 for full detail.
   `training`, `models`, `inference`, `monitoring`
 - **New this milestone**: Databricks secret scope `ced-secrets` (created,
   validated, currently unused by any pipeline)
-- **New this milestone**: service principal `test_sp`, Application Id
+- Service principal `test_sp`, Application Id
   `374365a1-96f6-4597-af4c-a82aec75fff6`, OAuth client credentials
   generated, scoped grants on `ced` (`USE CATALOG`) and `ced.training`
-  (`USE SCHEMA`, `SELECT`) — not adopted into any pipeline yet
+  (`USE SCHEMA`, `SELECT`) — **now authenticated live from GitHub Actions
+  every push to `main` (Milestone 14)**; still not adopted into the
+  training pipeline itself
 - **New this milestone**: `system.access.audit` confirmed populated,
   regional, 365-day default retention
 - MLflow: Databricks-managed workspace experiment
@@ -182,11 +235,19 @@ ADR-011 through ADR-014 for full detail.
   not SP OAuth client credentials.** This is a deliberate, not-yet-taken
   next step (distinct from the secret-scope decision) — see ADR-007
   Future Considerations.
-- **NEW — `test_sp` (the verification service principal) is not yet
-  formally adopted or deleted.** Currently harmless but unused; a cleanup
-  decision is pending.
-- **NEW — `system.access.audit` is verified and populated but nothing
-  consumes it yet.** No dashboard or scheduled query exists.
+- **`test_sp` is not yet formally adopted into the training pipeline, or
+  deleted.** Narrowed by Milestone 14 — it now has a genuine automated
+  consumer (the CI smoke test), so it's no longer purely unused
+  infrastructure, but `train_model.py` / `validate_and_promote_model.py`
+  still run under the personal account, not as `test_sp`. Cleanup/adoption
+  decision still pending.
+- **`system.access.audit` is verified and populated but nothing consumes
+  it yet.** No dashboard or scheduled query exists. Unaffected by
+  Milestone 14.
+- **NEW — local reproduction of the `dag-integrity` CI job needs
+  `python3.12` explicitly in WSL2**, not the distro's bare `python3`
+  (which is 3.14). Doesn't affect the real Airflow venv or the GitHub
+  Actions runner itself, only local ad hoc verification.
 
 ## Operating Rules Still In Effect (carried over, do not relax)
 - Build incrementally — one milestone at a time, user runs everything themselves.
@@ -209,14 +270,23 @@ ADR-011 through ADR-014 for full detail.
   Assumptions that turn out to be incorrect are corrected in the
   documentation, not just noted as "still assumed."
 - **Design proposals should be treated as genuinely open to challenge,
-  not rubber-stamped** — this milestone's "move PAT to secret scope"
+  not rubber-stamped** — Milestone 13's "move PAT to secret scope"
   proposal was reconsidered and correctly walked back once the bootstrap
   circularity was identified, rather than implemented as originally
-  agreed.
+  agreed. Milestone 14 applied the same discipline: a PAT-based smoke
+  test and full deploy automation were both considered and rejected with
+  documented reasoning (ADR-019), not defaulted into.
+- **Test the risky part before writing it into a CI config** — Milestone
+  14's `dag-integrity` design was validated by actually installing
+  Airflow 3.3.1 + the Databricks provider into a sandbox and running
+  `DagBag` against the real DAGs before proposing the CI job, which
+  caught two real API differences (Airflow 3.x dropped `DagBag`'s
+  `include_examples` kwarg; `DAG.schedule_interval` no longer exists,
+  replaced by `.timetable`) that would otherwise have shipped as a
+  broken test.
 
 ## Immediate Next Step
-Milestone 13 is closed. Milestone 14 (CI/CD extension) is next, per user
-direction given at the start of this milestone. Not yet scoped in detail —
+Milestone 14 is closed. Milestone 15 is next, not yet scoped in detail —
 do not begin without explicit user confirmation.
 
 ## Reference Files
@@ -224,7 +294,9 @@ do not begin without explicit user confirmation.
 - `docs/adr/ADR-002-airflow-orchestration-layer.md` — Airflow selection
   rationale
 - `docs/adr/ADR-007-security-secrets-management.md` — secrets, RBAC, and
-  audit logging findings and decisions (new, Milestone 13)
+  audit logging findings and decisions (Milestone 13)
+- `docs/adr/ADR-019-cicd-extension.md` — DAG integrity testing and live
+  smoke-test findings and decisions (new, Milestone 14)
 - `docs/adr/ADR-009` through `ADR-017` — see prior snapshots for
   individual summaries
 - `docs/adr/ADR-018-milestone-12-orchestration.md` — two-DAG split, WSL2

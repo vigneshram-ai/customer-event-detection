@@ -1,7 +1,9 @@
 # ADR-019: CI/CD Extension — DAG Integrity Testing and Live-Environment Smoke Test
 
-**Status:** Proposed (pending live verification — see Milestone 14 in
-`docs/project-status.md`)
+**Status:** Accepted — verified live on GitHub Actions (`ubuntu-latest`)
+and against the real Databricks Free Edition workspace, including a
+deliberate negative test (invalid `test_sp` secret correctly failed
+`databricks-smoke-test` rather than passing silently).
 **Date:** Milestone 14
 
 ## Context
