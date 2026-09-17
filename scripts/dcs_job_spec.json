@@ -1,0 +1,46 @@
+{
+  "_status": "DESIGNED ONLY — never submitted to any Databricks workspace. See docs/adr/ADR-020-docker-container-services.md. This top-level _status key is not part of the real Databricks Jobs API schema; remove it before ever actually submitting this spec.",
+
+  "name": "ced-train-model-dcs",
+
+  "tasks": [
+    {
+      "task_key": "train_model",
+
+      "new_cluster": {
+        "spark_version": "17.3.x-scala2.12",
+
+        "_spark_version_note": "Must match a Databricks Runtime version actually available in the target workspace at submission time — 17.3 LTS was the current LTS release as of this milestone (Sept 2026), chosen to align with the Dockerfile's databricksruntime/standard:17.3-LTS base. Never independently confirmed against a real workspace's supported version list.",
+
+        "node_type_id": "i3.xlarge",
+
+        "_node_type_note": "AWS instance type, chosen because the project's Databricks workspace URL (dbc-01205ae9-f87b.cloud.databricks.com) is AWS-hosted. This is a plausible placeholder, not a verified/available SKU — would need to be checked against `databricks clusters list-node-types` on a real workspace before submission.",
+
+        "num_workers": 2,
+
+        "data_security_mode": "SINGLE_USER",
+
+        "_data_security_mode_note": "Unity Catalog requires standard (shared) or dedicated (single-user) access mode — legacy 'no isolation shared' does not support Unity Catalog at all. SINGLE_USER was chosen to mirror the existing pattern in this project (a scoped identity with direct grants, same shape as test_sp's grants in ADR-007) rather than shared/multi-tenant compute. Whether SINGLE_USER + docker_image + Unity Catalog all combine cleanly together has not been verified against a real workspace — this is the single largest unverified assumption in this spec.",
+
+        "single_user_name": "REPLACE_WITH_JOB_RUNNING_IDENTITY",
+
+        "docker_image": {
+          "url": "REPLACE_WITH_PUSHED_IMAGE_URL",
+
+          "_docker_image_note": "e.g. docker.io/<dockerhub-username>/ced-train-job:latest, once (a) the image has actually been built and (b) pushed to a registry the workspace can reach. Neither has happened. If the registry requires auth, add a basic_auth block here (username + password/token) — omitted for a public Docker Hub image."
+        }
+      },
+
+      "spark_python_task": {
+        "python_file": "REPLACE_WITH_WORKSPACE_PATH_TO_training/train_model_job.py",
+
+        "_python_file_note": "Must be a path the job cluster can read at run time — e.g. a Databricks Repos path (/Workspace/Repos/<user>/customer-event-detection/training/train_model_job.py) if the repo is checked out into the workspace, or a Git source block (see below) instead of a static path. Not resolved to a real path since this has never been submitted."
+      },
+
+      "timeout_seconds": 3600,
+      "max_retries": 1,
+
+      "_retry_note": "1 retry chosen to mirror the retry posture already used elsewhere in this project's Airflow DAGs, not derived from any observed failure mode of this specific job (which has never run)."
+    }
+  ]
+}
